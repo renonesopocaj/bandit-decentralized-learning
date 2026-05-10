@@ -3,18 +3,16 @@ defaults:
   - optuna: sanitysweep
   - _self_
 
-# plot_mode: scalar or list. Allowed: per_parameter, all_together, heatmap.
-# When given a list, plots for each mode are written to a separate directory.
+# Sweep plotting controls. Keep this explicit so large sweeps do not
+# accidentally generate every supported visualization.
 plot_mode:
   - per_parameter
   - all_together
   - heatmap
 
-# direction: scalar or list controlling the metric reduction over timesteps
-# and nodes. avg = mean over timesteps and nodes. worse = max for metrics
-# where higher is worse (regret, distance, losses) and min otherwise.
-# When given a list (e.g. ["avg", "worse"]) both reductions are plotted in
-# separate directories.
+# avg = mean over all saved timesteps/nodes.
+# worse = worst scalar for the metric, using max for losses/regret/drift and
+# min for accuracy-like metrics.
 direction:
   - avg
   - worse

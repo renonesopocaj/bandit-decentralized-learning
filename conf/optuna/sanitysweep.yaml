@@ -1,17 +1,19 @@
-# Optuna study direction for the scalar objective returned by the sweep (validation accuracy).
 direction: maximize
-
 search_space:
   heterogeneity.alpha:
     name: alpha
     type: categorical
     choices: [0.1, 0.5]
-  topology.neighbor_sampler:
-    name: sampler
-    type: categorical
-    choices: [uniform, bandit]
   topology.sampling:
     type: categorical
     choices: [0.01, 0.1]
+  sampler.name:
+    name: sampler
+    type: categorical
+    choices: [uniform, epsilon_greedy]
+  sampler.params.epsilon:
+    name: epsilon
+    type: categorical
+    choices: [0.1]
     when:
-      topology.neighbor_sampler: [uniform, bandit]
+      sampler.name: epsilon_greedy
