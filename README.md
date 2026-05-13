@@ -51,6 +51,9 @@ hydra:
     dir: .hydra_multirun_override/${now:%Y-%m-%d}/${now:%H-%M-%S}
 ```
 
+Detailed config documentation lives in [docs/config.md](/home/ale/Projects/BanditDL/docs/config.md).
+Sweep-specific documentation lives in [docs/sweeps.md](/home/ale/Projects/BanditDL/docs/sweeps.md).
+
 ## Run Sweeps (Hydra Multirun)
 
 Hydra does orchestration. The custom in-repo scheduler is no longer the main path.
