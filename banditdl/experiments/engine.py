@@ -173,6 +173,16 @@ def _make_args(
     args.setdefault("validation-ratio", 0.5)
     args.setdefault("eval-split-seed", 0)
     args.setdefault("evaluate-test", False)
+    args.setdefault("partition-method", "dirichlet")
+    args.setdefault("partition-style", None)
+    args.setdefault("classes-per-worker", None)
+    args.setdefault("nb-shards", None)
+    args.setdefault("shards-per-worker", None)
+    args.setdefault("nb-groups", None)
+    args.setdefault("classes-per-group", None)
+    args.setdefault("group-overlap", 0)
+    args.setdefault("dataset-mode", None)
+    args.setdefault("nb-writers-limit", None)
     args["result-directory"] = str(result_dir)
     args["seed"] = seed
     args["device"] = device
@@ -304,6 +314,16 @@ def run_dynamic(params: dict, result_dir: pathlib.Path, seed: int, device: str) 
         test_batch=args.batch_size_test,
         validation_ratio=args.validation_ratio,
         split_seed=args.eval_split_seed,
+        partition_method=args.partition_method,
+        partition_style=args.partition_style,
+        classes_per_worker=args.classes_per_worker,
+        nb_shards=args.nb_shards,
+        shards_per_worker=args.shards_per_worker,
+        nb_groups=args.nb_groups,
+        classes_per_group=args.classes_per_group,
+        group_overlap=args.group_overlap,
+        dataset_mode=args.dataset_mode,
+        nb_writers_limit=args.nb_writers_limit,
     )
 
     result_dir.mkdir(parents=True, exist_ok=True)
@@ -583,6 +603,16 @@ def run_fixed(params: dict, result_dir: pathlib.Path, seed: int, device: str) ->
         test_batch=args.batch_size_test,
         validation_ratio=args.validation_ratio,
         split_seed=args.eval_split_seed,
+        partition_method=args.partition_method,
+        partition_style=args.partition_style,
+        classes_per_worker=args.classes_per_worker,
+        nb_shards=args.nb_shards,
+        shards_per_worker=args.shards_per_worker,
+        nb_groups=args.nb_groups,
+        classes_per_group=args.classes_per_group,
+        group_overlap=args.group_overlap,
+        dataset_mode=args.dataset_mode,
+        nb_writers_limit=args.nb_writers_limit,
     )
 
     nb_edges = args.nb_workers * args.nb_neighbors // 2

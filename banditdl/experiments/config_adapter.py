@@ -70,6 +70,31 @@ def _sampler_reward(cfg: DictConfig) -> str:
     return str(cfg.topology.get("bandit_reward", "parameter_distance"))
 
 
+def _partition_token(cfg: DictConfig) -> str:
+    if cfg.dataset.get("mode") == "writer_per_node":
+        cap = cfg.dataset.get("nb_writers_limit")
+        return "femnist_writers" if cap is None else f"femnist_writers_cap_{cap}"
+    method = str(cfg.heterogeneity.get("method", "dirichlet"))
+    if method == "dirichlet":
+        return f"alpha_{cfg.heterogeneity.alpha}"
+    if method == "pathological":
+        style = str(cfg.heterogeneity.get("partition", ""))
+        if style == "classes_per_worker":
+            return f"pathological_c_{cfg.heterogeneity.get('classes_per_worker')}"
+        if style == "shards_per_worker":
+            nb_shards = cfg.heterogeneity.get("nb_shards", "auto")
+            shards = cfg.heterogeneity.get("shards_per_worker")
+            return f"pathological_s_{shards}_n_{nb_shards}"
+        if style == "grouped_classes":
+            ng = cfg.heterogeneity.get("nb_groups")
+            cpg = cfg.heterogeneity.get("classes_per_group")
+            ov = cfg.heterogeneity.get("group_overlap", 0)
+            base = f"pathological_g_{ng}x{cpg}"
+            return f"{base}_ov_{ov}" if ov else base
+        return f"pathological_{style}"
+    return f"hetero_{method}"
+
+
 def _run_name(cfg: DictConfig, byzantine_budget: int, nb_neighbors: int) -> str:
     nodes = _nodes(cfg)
     is_dynamic = is_dynamic_topology(cfg.topology)
@@ -86,7 +111,7 @@ def _run_name(cfg: DictConfig, byzantine_budget: int, nb_neighbors: int) -> str:
         f"{topology_token}"
         f"-sampler_{sampler}"
         f"-f_{cfg.adversary.byzcount}"
-        f"-alpha_{cfg.heterogeneity.alpha}"
+        f"-{_partition_token(cfg)}"
         f"-byz_budget_{byzantine_budget}"
         f"-nb-local_{cfg.optimization.nb_local_steps}"
     )
@@ -109,11 +134,24 @@ def build_engine_config(cfg: DictConfig) -> EngineRunConfig:
     if rounds is None:
         raise ValueError("Missing optimization.rounds")
 
+    partition_method = str(cfg.heterogeneity.get("method", "dirichlet"))
+    dataset_mode = cfg.dataset.get("mode")
+    if dataset_mode == "writer_per_node" and str(cfg.dataset.dataset).lower() != "femnist":
+        raise ValueError(
+            f"dataset.mode='writer_per_node' is only supported for FEMNIST "
+            f"(got dataset={cfg.dataset.dataset!r})"
+        )
+    skip_partitioning = dataset_mode == "writer_per_node"
+    dirichlet_alpha_raw = cfg.heterogeneity.get("alpha")
+    if partition_method == "dirichlet" and dirichlet_alpha_raw is None and not skip_partitioning:
+        raise ValueError("heterogeneity.alpha is required when method=dirichlet")
+    dirichlet_alpha = float(dirichlet_alpha_raw) if dirichlet_alpha_raw is not None else None
+
     params: dict[str, Any] = {
         "dataset": cfg.dataset.dataset,
         "model": cfg.dataset.model,
         "nb-workers": nodes,
-        "dirichlet-alpha": float(cfg.heterogeneity.alpha),
+        "dirichlet-alpha": dirichlet_alpha,
         "nb-decl-byz": int(cfg.adversary.byzcount),
         "nb-real-byz": int(cfg.adversary.byzcount),
         "nb-neighbors": nb_neighbors,
@@ -129,9 +167,62 @@ def build_engine_config(cfg: DictConfig) -> EngineRunConfig:
         "aggregator": cfg.aggregator.aggregator,
         "pre-aggregator": _get(cfg.aggregator, "pre-aggregator", "pre_aggregator"),
         "rag": bool(cfg.aggregator.rag),
-        "numb-labels": int(cfg.heterogeneity.numb_labels),
+        "numb-labels": int(cfg.dataset.get("numb_labels", cfg.heterogeneity.numb_labels)),
         "evaluation-delta": int(cfg.evaluation.evaluation_delta),
+        "dataset-mode": dataset_mode,
+        "nb-writers-limit": cfg.dataset.get("nb_writers_limit"),
+        "partition-method": partition_method,
+        "partition-style": cfg.heterogeneity.get("partition"),
+        "classes-per-worker": cfg.heterogeneity.get("classes_per_worker"),
+        "nb-shards": cfg.heterogeneity.get("nb_shards"),
+        "shards-per-worker": cfg.heterogeneity.get("shards_per_worker"),
+        "nb-groups": cfg.heterogeneity.get("nb_groups"),
+        "classes-per-group": cfg.heterogeneity.get("classes_per_group"),
+        "group-overlap": cfg.heterogeneity.get("group_overlap", 0),
     }
+
+    if partition_method == "pathological":
+        valid_styles = {"classes_per_worker", "shards_per_worker", "grouped_classes"}
+        if params["partition-style"] not in valid_styles:
+            raise ValueError(
+                "heterogeneity.partition must be one of "
+                f"{sorted(valid_styles)} when method=pathological"
+            )
+        if params["partition-style"] == "classes_per_worker" and params["classes-per-worker"] is None:
+            raise ValueError(
+                "heterogeneity.classes_per_worker is required when partition=classes_per_worker"
+            )
+        if params["partition-style"] == "shards_per_worker" and params["shards-per-worker"] is None:
+            raise ValueError(
+                "heterogeneity.shards_per_worker is required when partition=shards_per_worker"
+            )
+        if params["partition-style"] == "grouped_classes":
+            if params["nb-groups"] is None or params["classes-per-group"] is None:
+                raise ValueError(
+                    "heterogeneity.nb_groups and heterogeneity.classes_per_group are required "
+                    "when partition=grouped_classes"
+                )
+            if nodes < int(params["nb-groups"]):
+                raise ValueError(
+                    f"topology.nodes ({nodes}) must be >= heterogeneity.nb_groups "
+                    f"({int(params['nb-groups'])})"
+                )
+        params["classes-per-worker"] = (
+            int(params["classes-per-worker"]) if params["classes-per-worker"] is not None else None
+        )
+        params["shards-per-worker"] = (
+            int(params["shards-per-worker"]) if params["shards-per-worker"] is not None else None
+        )
+        params["nb-shards"] = (
+            int(params["nb-shards"]) if params["nb-shards"] is not None else None
+        )
+        params["nb-groups"] = (
+            int(params["nb-groups"]) if params["nb-groups"] is not None else None
+        )
+        params["classes-per-group"] = (
+            int(params["classes-per-group"]) if params["classes-per-group"] is not None else None
+        )
+        params["group-overlap"] = int(params["group-overlap"]) if params["group-overlap"] is not None else 0
 
     learning_rate = cfg.optimization.get("learning_rate")
     if learning_rate is not None:

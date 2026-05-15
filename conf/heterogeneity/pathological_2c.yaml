@@ -1,0 +1,5 @@
+method: pathological
+partition: classes_per_worker
+classes_per_worker: 2
+numb_labels: 10
+alpha: null
