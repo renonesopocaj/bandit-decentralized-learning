@@ -7,12 +7,12 @@
 # Sweep names defined below: cifar_dirichlet, femnist_pool_dirichlet,
 # cifar_grouped, femnist_pool_grouped, femnist_writer.
 #
-# This is a thin wrapper around `sbatch slurm/sbatch_banditdl.sh ...`.
+# This is a thin wrapper around `sbatch slurm/sbatch_banditdl_gpu.sh ...`.
 # Each combination becomes its own job. Edit the axis arrays below to adjust scope.
 
 set -euo pipefail
 
-PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="${SLURM_SUBMIT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$PROJECT_ROOT"
 
 SWEEP="${1:-}"
@@ -30,7 +30,7 @@ submit_one() {
     local name="$1"; shift
     local override="$1"; shift
     echo "[submit] $name -- $override"
-    sbatch --job-name="$name" --time=02:00:00 slurm/sbatch_banditdl.sh $override
+    sbatch --job-name="$name" --time=02:00:00 slurm/sbatch_banditdl_gpu.sh $override
 }
 
 count=0
