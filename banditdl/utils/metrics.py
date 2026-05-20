@@ -109,14 +109,33 @@ def resolve_metric(metric: MetricKey | str) -> MetricKey:
 def read_eval(path: Path) -> tuple[np.ndarray, np.ndarray]:
     steps: list[float] = []
     values: list[float] = []
+    skipped = 0
     with path.open() as fd:
         for line in fd:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            step, value, *_ = line.split()
-            steps.append(float(step))
-            values.append(float(value))
+            tokens = line.split()
+            if len(tokens) < 2:
+                # Surface but tolerate corrupted lines (typically interleaved writes
+                # when multiple jobs collide on the same hydra run dir).
+                skipped += 1
+                continue
+            try:
+                step = float(tokens[0])
+                value = float(tokens[1])
+            except ValueError:
+                skipped += 1
+                continue
+            steps.append(step)
+            values.append(value)
+    if skipped:
+        import warnings
+        warnings.warn(
+            f"{path}: skipped {skipped} malformed line(s); the file may be from a "
+            "collided run-dir (check hydra.run.dir uniqueness).",
+            stacklevel=2,
+        )
     return np.asarray(steps), np.asarray(values)
 
 

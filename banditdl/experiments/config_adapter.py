@@ -169,6 +169,8 @@ def build_engine_config(cfg: DictConfig) -> EngineRunConfig:
         "rag": bool(cfg.aggregator.rag),
         "numb-labels": int(cfg.dataset.get("numb_labels", cfg.heterogeneity.numb_labels)),
         "evaluation-delta": int(cfg.evaluation.evaluation_delta),
+        "global-test-ratio": float(cfg.evaluation.get("global_test_ratio", 0.1)),
+        "local-test-ratio": float(cfg.evaluation.get("local_test_ratio", 0.2)),
         "dataset-mode": dataset_mode,
         "nb-writers-limit": cfg.dataset.get("nb_writers_limit"),
         "partition-method": partition_method,

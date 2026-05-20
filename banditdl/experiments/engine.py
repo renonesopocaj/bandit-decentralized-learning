@@ -170,7 +170,8 @@ def _make_args(
     args.setdefault("bandit-epsilon", 0.1)
     args.setdefault("bandit-initial-value", 0.0)
     args.setdefault("bandit-reward", "parameter_distance")
-    args.setdefault("validation-ratio", 0.5)
+    args.setdefault("global-test-ratio", 0.1)
+    args.setdefault("local-test-ratio", 0.2)
     args.setdefault("eval-split-seed", 0)
     args.setdefault("evaluate-test", False)
     args.setdefault("partition-method", "dirichlet")
@@ -194,7 +195,7 @@ def _make_args(
     return SimpleNamespace(**normalized)
 
 
-def _init_workers_dynamic(args, train_loader_dict, validation_loader):
+def _init_workers_dynamic(args, train_loader_dict, local_test_loader_dict):
     workers = []
     for worker_id in range(args.nb_honests):
         sampler_params = dict(args.sampler_params or {})
@@ -217,7 +218,7 @@ def _init_workers_dynamic(args, train_loader_dict, validation_loader):
         w = DynamicWorker(
             worker_id,
             train_loader_dict[worker_id],
-            validation_loader,
+            local_test_loader_dict[worker_id],
             args.nb_workers,
             args.nb_decl_byz,
             args.nb_real_byz,
@@ -279,6 +280,22 @@ def _dynamic_candidate_weights(w, honest_weights, byz_workers, current_step):
     return candidate_weights
 
 
+def _full_sampler_probability_vector(worker, nb_total: int) -> np.ndarray:
+    """Return the full per-arm sampler probability row for `worker`.
+
+    Length is `nb_total`; the worker's own slot is 0 (it cannot pick itself).
+    """
+    population = [i for i in range(nb_total) if i != worker.worker_id]
+    probabilities_by_arm = worker.neighbor_sampler.probabilities(
+        population,
+        worker.nb_neighbors,
+    )
+    row = np.zeros(nb_total, dtype=float)
+    for arm in population:
+        row[arm] = float(probabilities_by_arm[arm])
+    return row
+
+
 def _sampler_probability_stats(worker) -> tuple[float, float, float]:
     population = list(range(worker.nb_honest + worker.nb_byz))
     population.remove(worker.worker_id)
@@ -302,7 +319,7 @@ def run_dynamic(params: dict, result_dir: pathlib.Path, seed: int, device: str) 
     _setup_seed(args.seed)
     _log_start("dynamic", args, result_dir)
 
-    train_loader_dict, validation_loader, test_loader = dataset.make_train_validation_test_datasets(
+    train_loader_dict, local_test_loader_dict, test_loader = dataset.make_train_validation_test_datasets(
         args.dataset,
         heterogeneity=args.hetero,
         numb_labels=args.numb_labels,
@@ -312,7 +329,8 @@ def run_dynamic(params: dict, result_dir: pathlib.Path, seed: int, device: str) 
         honest_workers=args.nb_honests,
         train_batch=args.batch_size,
         test_batch=args.batch_size_test,
-        validation_ratio=args.validation_ratio,
+        global_test_ratio=args.global_test_ratio,
+        local_test_ratio=args.local_test_ratio,
         split_seed=args.eval_split_seed,
         partition_method=args.partition_method,
         partition_style=args.partition_style,
@@ -327,7 +345,7 @@ def run_dynamic(params: dict, result_dir: pathlib.Path, seed: int, device: str) 
     )
 
     result_dir.mkdir(parents=True, exist_ok=True)
-    workers = _init_workers_dynamic(args, train_loader_dict, validation_loader)
+    workers = _init_workers_dynamic(args, train_loader_dict, local_test_loader_dict)
 
     byz_workers = [
         ByzantineWorker(
@@ -583,6 +601,21 @@ def run_dynamic(params: dict, result_dir: pathlib.Path, seed: int, device: str) 
         os.path.join(result_dir, "sampler_max_probability.npy"),
         np.array(sampler_max_probability_history),
     )
+
+    sampler_probabilities_final = np.stack(
+        [_full_sampler_probability_vector(w, args.nb_workers) for w in workers]
+    )
+    np.save(
+        os.path.join(result_dir, "sampler_probabilities_final.npy"),
+        sampler_probabilities_final,
+    )
+    with torch.no_grad():
+        final_weights = torch.stack([w.pull(None) for w in workers])
+        pairwise_distance_final = torch.cdist(final_weights, final_weights).cpu().numpy()
+    np.save(
+        os.path.join(result_dir, "pairwise_model_distance_final.npy"),
+        pairwise_distance_final,
+    )
     _log_done("dynamic")
 
 
@@ -591,7 +624,7 @@ def run_fixed(params: dict, result_dir: pathlib.Path, seed: int, device: str) ->
     _setup_seed(args.seed)
     _log_start("fixed", args, result_dir)
 
-    train_loader_dict, validation_loader, test_loader = dataset.make_train_validation_test_datasets(
+    train_loader_dict, local_test_loader_dict, test_loader = dataset.make_train_validation_test_datasets(
         args.dataset,
         heterogeneity=args.hetero,
         numb_labels=args.numb_labels,
@@ -601,7 +634,8 @@ def run_fixed(params: dict, result_dir: pathlib.Path, seed: int, device: str) ->
         honest_workers=args.nb_honests,
         train_batch=args.batch_size,
         test_batch=args.batch_size_test,
-        validation_ratio=args.validation_ratio,
+        global_test_ratio=args.global_test_ratio,
+        local_test_ratio=args.local_test_ratio,
         split_seed=args.eval_split_seed,
         partition_method=args.partition_method,
         partition_style=args.partition_style,
@@ -637,7 +671,7 @@ def run_fixed(params: dict, result_dir: pathlib.Path, seed: int, device: str) ->
         w = FixedGraphWorker(
             worker_id,
             train_loader_dict[worker_id],
-            validation_loader,
+            local_test_loader_dict[worker_id],
             args.nb_workers,
             args.nb_decl_byz,
             args.nb_real_byz,
@@ -833,5 +867,12 @@ def run_fixed(params: dict, result_dir: pathlib.Path, seed: int, device: str) ->
     np.save(
         os.path.join(result_dir, "consensus_drift.npy"),
         np.array(consensus_drift_history),
+    )
+    with torch.no_grad():
+        final_weights = torch.stack([w.pull(None) for w in workers])
+        pairwise_distance_final = torch.cdist(final_weights, final_weights).cpu().numpy()
+    np.save(
+        os.path.join(result_dir, "pairwise_model_distance_final.npy"),
+        pairwise_distance_final,
     )
     _log_done("fixed")

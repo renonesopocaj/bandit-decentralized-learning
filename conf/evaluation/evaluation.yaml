@@ -1,1 +1,7 @@
 evaluation_delta: 20
+# Fraction of the official train pool held out before client partitioning, used as a
+# uniform global test set evaluated by every worker.
+global_test_ratio: 0.1
+# Fraction of each client's local partition held out (uniformly) as that client's
+# local test set. The remainder is the client's local training data.
+local_test_ratio: 0.2

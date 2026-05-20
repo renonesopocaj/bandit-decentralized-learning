@@ -13,5 +13,4 @@ hydra_runs_override/
 .venv/
 optuna_runs/
 .optuna_runs/
-slurm/
 job_output/

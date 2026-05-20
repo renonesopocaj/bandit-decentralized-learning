@@ -1,12 +1,22 @@
 """Dataset utility functions."""
 
+import os
 import pathlib
 import numpy as np
 
 
 def get_default_root():
-    """Lazy-initialize and return the default dataset root directory path."""
-    default_root = pathlib.Path(__file__).parent.parent / "datasets" / "cache"
+    """Lazy-initialize and return the dataset root directory path.
+
+    Honors the `BANDITDL_DATASET_ROOT` environment variable when set — useful on
+    HPC nodes where `$HOME` is quota-limited and big datasets must live elsewhere
+    (e.g. `$SCRATCH`). Falls back to `banditdl/datasets/cache/` under the repo.
+    """
+    override = os.environ.get("BANDITDL_DATASET_ROOT")
+    if override:
+        default_root = pathlib.Path(override).expanduser()
+    else:
+        default_root = pathlib.Path(__file__).parent.parent / "datasets" / "cache"
     default_root.mkdir(parents=True, exist_ok=True)
     return default_root
 

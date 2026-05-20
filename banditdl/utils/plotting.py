@@ -347,3 +347,15 @@ def plot_all(run_dir: Path, plots_dir: Path, run_label: str) -> None:
             ),
         ],
     )
+
+    from banditdl.utils.plot_graph import plot_clustering_graph
+
+    for weight_source in ("sampler_probability", "neighbor_disagreement"):
+        try:
+            plot_clustering_graph(
+                run_dir,
+                Path(plots_dir) / f"clustering_{weight_source}.png",
+                weight_source=weight_source,
+            )
+        except FileNotFoundError:
+            pass
