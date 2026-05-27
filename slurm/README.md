@@ -1,11 +1,17 @@
-# Running BanditDL on EPFL Izar (Slurm)
+# Running BanditDL on EPFL Slurm clusters
 
-Two scripts:
+Scripts:
 
 | File | Where to run | Purpose |
 | --- | --- | --- |
 | `slurm/setup.sh` | **Login node** | One-time: install `uv`, sync deps, optionally pre-download FEMNIST. |
-| `slurm/sbatch_banditdl.sh` | **Login node** (via `sbatch`) | Submits one training run. Takes Hydra overrides as args. |
+| `slurm/sbatch_banditdl_gpu.sh` | **Login node** (via `sbatch`) | Submits one GPU training run (e.g. Izar). Takes Hydra overrides as args. |
+| `slurm/sbatch_banditdl_cpu.sh` | **Login node** (via `sbatch`) | Submits one CPU-only training run (e.g. Jed). Takes Hydra overrides as args. |
+
+The two `sbatch_banditdl_*` scripts are identical except for the partition/GPU
+directives and the auto-injected `device=` default (`cuda` for GPU, `cpu` for
+CPU). The examples below use the GPU script; swap in `sbatch_banditdl_cpu.sh`
+to run the same command on a CPU partition.
 
 ## 1. One-time bootstrap (login node)
 
@@ -26,28 +32,31 @@ export HF_DATASETS_CACHE=$SCRATCH/banditdl/hf-cache
 bash slurm/setup.sh --femnist
 ```
 
-You will also need to `export HF_DATASETS_CACHE=...` in any sbatch invocation — the easiest path is to put that `export` in `~/.bashrc` (Izar uses `bash -l` for jobs, so login-shell init files are sourced).
+You will also need to `export HF_DATASETS_CACHE=...` in any sbatch invocation — the easiest path is to put that `export` in `~/.bashrc` (jobs use `bash -l`, so login-shell init files are sourced).
 
 ## 2. Submitting a single run
 
 ```bash
 # CIFAR-10, epsilon-greedy bandit, seed 0
-sbatch slurm/sbatch_banditdl.sh dataset=cifar10 sampler=bandit seed=0
+sbatch slurm/sbatch_banditdl_gpu.sh dataset=cifar10 sampler=bandit seed=0
 
 # FEMNIST writer-per-node, default sampler, 30 nodes
-sbatch slurm/sbatch_banditdl.sh dataset=femnist topology.nodes=30
+sbatch slurm/sbatch_banditdl_gpu.sh dataset=femnist topology.nodes=30
 
 # CIFAR-10 with the grouped clustering partition
-sbatch slurm/sbatch_banditdl.sh \
+sbatch slurm/sbatch_banditdl_gpu.sh \
     dataset=cifar10 sampler=bandit heterogeneity=grouped_5x2 topology.nodes=30 seed=0
 ```
 
-All positional args are forwarded to `uv run -m banditdl`. `device=cuda` is added automatically unless you provide your own `device=` override.
+All positional args are forwarded to `uv run -m banditdl`. `device=cuda` (GPU script) or `device=cpu` (CPU script) is added automatically unless you provide your own `device=` override.
 
-Override sbatch directives via the CLI:
+Override sbatch directives via the CLI. Email notifications are **not** baked
+into the committed scripts, so add them here if you want them:
 
 ```bash
-sbatch --time=04:00:00 --job-name=fast_cifar slurm/sbatch_banditdl.sh dataset=cifar10
+sbatch --time=04:00:00 --job-name=fast_cifar \
+    --mail-type=END,FAIL --mail-user=you@epfl.ch \
+    slurm/sbatch_banditdl_gpu.sh dataset=cifar10
 ```
 
 ## 3. Sweeps
@@ -59,7 +68,7 @@ Two patterns work; pick by sweep size.
 ```bash
 for seed in 0 1 2; do
   for sampler in uniform bandit exp3; do
-    sbatch slurm/sbatch_banditdl.sh \
+    sbatch slurm/sbatch_banditdl_gpu.sh \
         dataset=cifar10 topology=dynamic sampler=$sampler seed=$seed
   done
 done
@@ -70,24 +79,20 @@ Each combination becomes its own job and runs in parallel as cluster capacity al
 **Pattern B — single sbatch with Hydra multirun (best for sweeps that fit in one walltime):**
 
 ```bash
-sbatch --time=24:00:00 slurm/sbatch_banditdl.sh -m \
+sbatch --time=24:00:00 slurm/sbatch_banditdl_gpu.sh -m \
     dataset=cifar10 topology=dynamic \
     sampler=uniform,bandit,exp3 seed=0,1,2
 ```
 
 Hydra's `-m` flag enumerates the Cartesian product **sequentially** inside one job. Output goes to `.hydra_multirun/<date>/<time>/<idx>/`. Use this when total walltime is manageable; otherwise prefer Pattern A.
 
-**Pattern C — Optuna grid sweep (for the dedicated sweep entry point):**
+**Pattern C — Optuna sweep (dedicated sweep entry point):**
+
+The `slurm/submit_sweep_gpu.sh` / `slurm/submit_sweep_cpu.sh` helpers wrap the
+Optuna entry point for larger searches:
 
 ```bash
-sbatch --time=24:00:00 slurm/sbatch_banditdl.sh \
-    --module banditdl.experiments.sweep optuna=sweep
-```
-
-…but note that `sbatch_banditdl.sh` calls `uv run -m banditdl`, so for `banditdl.experiments.sweep` you'd want a tiny variant. If you need this, copy `sbatch_banditdl.sh` to `sbatch_sweep.sh` and change the final `srun` line to:
-
-```bash
-srun --cpu-bind=cores uv run python -m banditdl.experiments.sweep "$@"
+sbatch --time=24:00:00 slurm/submit_sweep_gpu.sh optuna=sweep
 ```
 
 ## 4. Output
@@ -105,16 +110,16 @@ Both `job_output/` and the Hydra dirs are gitignored.
 | `CUDA out of memory` | Too-large batch on V100 | Override: `optimization.batch_size=16` |
 | `Could not load 'override'` | Missing `conf/override.yaml` | Create one per the root README, or pass overrides via CLI |
 | FEMNIST stalls on first run | First call downloads the HF dataset | Pre-download with `bash slurm/setup.sh --femnist` |
-| Job dies at 12h walltime | Default time limit | Override: `sbatch --time=24:00:00 slurm/sbatch_banditdl.sh ...` |
+| Job dies at 12h walltime | Default time limit | Override: `sbatch --time=24:00:00 slurm/sbatch_banditdl_gpu.sh ...` |
 
 ## 6. Defaults at a glance
 
-The sbatch directives in `sbatch_banditdl.sh` mirror your `test.sh` conventions:
+The sbatch directives in `sbatch_banditdl_gpu.sh`:
 
-- `--partition=gpu --gres=gpu:1`
+- `--partition=gpu --gres=gpu:1` (the CPU script uses `--partition=academic` and no GPU)
 - `--nodes=1 --ntasks=1 --cpus-per-task=8 --mem=16G`
-- `--time=12:00:00` (shorter than your 48h default — CIFAR 2000 rounds finishes in well under that on a V100)
-- `--mail-user=mattea.busato@epfl.ch` and `--mail-type=END,FAIL`
+- `--time=12:00:00` (CIFAR 2000 rounds finishes in well under that on a V100)
+- `--mail-type=END,FAIL` — but **no** `--mail-user`; pass your own on the `sbatch` CLI
 - `srun --cpu-bind=cores`
 
 All overridable via the `sbatch` CLI.

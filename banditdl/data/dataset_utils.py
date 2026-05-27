@@ -42,12 +42,17 @@ def draw_indices(samples_distribution, indices_per_label, nb_workers):
 
 
 def _indices_per_label(targets, numb_labels):
-    """Return a {label: [sample_index, ...]} dict over a torch/numpy targets tensor."""
-    indices_per_label = {}
-    for label in range(numb_labels):
-        label_indices = (targets == label).nonzero().tolist()
-        indices_per_label[label] = [item for sublist in label_indices for item in sublist]
-    return indices_per_label
+    """Return a {label: [sample_index, ...]} dict over a torch or numpy targets array.
+
+    `np.asarray` accepts both torch tensors (CPU) and numpy arrays, and
+    `np.flatnonzero` returns flat 1-D indices for either, avoiding torch's
+    2-D `.nonzero()` shape and numpy's tuple-returning `ndarray.nonzero()`.
+    """
+    targets = np.asarray(targets)
+    return {
+        label: np.flatnonzero(targets == label).tolist()
+        for label in range(numb_labels)
+    }
 
 
 def pathological_classes_per_worker(targets, numb_labels, nb_workers, classes_per_worker, rng=None):

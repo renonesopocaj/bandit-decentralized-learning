@@ -48,8 +48,11 @@ def test_pathological_shards_per_worker_consumes_all_shards_by_default():
 
     all_indices = sorted(i for indices in worker_samples.values() for i in indices)
     assert all_indices == list(range(20 * 5)), "shards_per_worker default should cover the whole dataset"
-    for indices in worker_samples.values():
-        assert len(indices) == 20 * 5 // 4
+    # np.array_split can make shards differ in size by 1 when the dataset is not
+    # evenly divisible, so per-worker counts (shards_per_worker=2 shards each) can
+    # differ by at most shards_per_worker. Assert that invariant, not an exact size.
+    counts = [len(indices) for indices in worker_samples.values()]
+    assert max(counts) - min(counts) <= 2
 
 
 def test_pathological_shards_per_worker_rejects_too_few_shards():

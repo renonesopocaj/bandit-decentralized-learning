@@ -1,9 +1,9 @@
 #!/bin/bash -l
 # Submit a BanditDL run on the EPFL Izar GPU cluster.
 #
-#   sbatch slurm/sbatch_banditdl.sh dataset=cifar10 sampler=bandit seed=0
-#   sbatch slurm/sbatch_banditdl.sh dataset=femnist topology.nodes=30
-#   sbatch --time=04:00:00 --job-name=cifar_seed3 slurm/sbatch_banditdl.sh dataset=cifar10 seed=3
+#   sbatch slurm/sbatch_banditdl_gpu.sh dataset=cifar10 sampler=bandit seed=0
+#   sbatch slurm/sbatch_banditdl_gpu.sh dataset=femnist topology.nodes=30
+#   sbatch --time=04:00:00 --job-name=cifar_seed3 slurm/sbatch_banditdl_gpu.sh dataset=cifar10 seed=3
 #
 # All positional args are forwarded as Hydra overrides. The script auto-adds
 # `device=cuda` unless the caller passes their own `device=` override.
@@ -18,7 +18,9 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=job_output/banditdl_%j.txt
 #SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=mattea.busato@epfl.ch
+# Mail notifications are opt-in: pass `--mail-user=you@example.com` on the
+# `sbatch` CLI (or uncomment and edit the line below) to receive them.
+# #SBATCH --mail-user=you@example.com
 
 set -euo pipefail
 

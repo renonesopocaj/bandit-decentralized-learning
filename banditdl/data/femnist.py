@@ -26,7 +26,7 @@ from functools import lru_cache
 import numpy as np
 import torch
 import torchvision.transforms as T
-from datasets import DatasetDict, load_dataset
+from datasets import Dataset as HFDataset, DatasetDict, load_dataset
 from torch.utils.data import DataLoader, Dataset, Subset
 
 FEMNIST_HF_NAME = "flwrlabs/femnist"
@@ -94,7 +94,7 @@ def _writer_groups(hf_split) -> dict[str, list[int]]:
     return groups
 
 
-def _full_pool_split(hf) -> tuple:
+def _full_pool_split(hf) -> HFDataset:
     """Return the pooled HF split (train + test concatenated if both exist).
 
     The official FEMNIST distribution we use only has a `train` split, but

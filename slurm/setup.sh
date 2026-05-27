@@ -40,4 +40,4 @@ print('[setup] FEMNIST splits:', {k: len(v) for k, v in dd.items()})
 "
 fi
 
-echo "[setup] done. Submit jobs with:  sbatch slurm/sbatch_banditdl.sh <hydra overrides>"
+echo "[setup] done. Submit jobs with:  sbatch slurm/sbatch_banditdl_gpu.sh <hydra overrides>  (or slurm/sbatch_banditdl_cpu.sh on a CPU cluster)"

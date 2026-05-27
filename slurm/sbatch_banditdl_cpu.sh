@@ -17,7 +17,9 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=job_output/banditdl_%j.txt
 #SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=mattea.busato@epfl.ch
+# Mail notifications are opt-in: pass `--mail-user=you@example.com` on the
+# `sbatch` CLI (or uncomment and edit the line below) to receive them.
+# #SBATCH --mail-user=you@example.com
 
 set -euo pipefail
 

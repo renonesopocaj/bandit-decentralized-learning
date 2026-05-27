@@ -82,7 +82,9 @@ def _partition_token(cfg: DictConfig) -> str:
         if style == "classes_per_worker":
             return f"pathological_c_{cfg.heterogeneity.get('classes_per_worker')}"
         if style == "shards_per_worker":
-            nb_shards = cfg.heterogeneity.get("nb_shards", "auto")
+            # Treat an explicit null nb_shards the same as a missing one so the
+            # run name reads "..._n_auto" instead of "..._n_None".
+            nb_shards = cfg.heterogeneity.get("nb_shards") or "auto"
             shards = cfg.heterogeneity.get("shards_per_worker")
             return f"pathological_s_{shards}_n_{nb_shards}"
         if style == "grouped_classes":

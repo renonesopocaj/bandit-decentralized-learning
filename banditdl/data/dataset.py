@@ -257,9 +257,15 @@ def make_train_validation_test_datasets(
   total = len(full_train_dataset)
   if total < 2:
     raise ValueError("Need at least 2 training samples to carve a global test split")
+  if honest_workers >= total:
+    raise ValueError(
+      f"honest_workers ({honest_workers}) must be < number of training samples ({total}); "
+      "otherwise no samples remain for the client pool after the global-test holdout"
+    )
   rng = np.random.default_rng(split_seed)
   permuted = rng.permutation(total)
   global_test_size = int(round(total * global_test_ratio))
+  # total - honest_workers >= 1 here, so the upper clamp stays positive.
   global_test_size = min(max(global_test_size, 1), total - honest_workers)
   global_test_indices = permuted[:global_test_size].tolist()
   client_pool_indices = permuted[global_test_size:].tolist()
