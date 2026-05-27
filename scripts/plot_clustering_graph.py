@@ -26,6 +26,13 @@ def main():
         default="sampler_probability",
     )
     parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="keep only edges with weight strictly above this value "
+        "(e.g. drop near-uniform exploration edges; None = keep all)",
+    )
+    parser.add_argument(
         "--top-edges",
         type=int,
         default=None,
@@ -58,6 +65,7 @@ def main():
                 results_dir,
                 plots_dir / out_name,
                 weight_source=args.weight,
+                threshold=args.threshold,
                 top_edges_per_node=args.top_edges,
                 layout=args.layout,
             )

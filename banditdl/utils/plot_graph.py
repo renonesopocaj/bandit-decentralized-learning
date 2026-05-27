@@ -3,10 +3,19 @@
 Two edge-weight modes:
 
 - `sampler_probability`: uses `sampler_probabilities_final.npy`, the per-worker
-  final-round sampler distribution. Edge (i, j) weight = (P[i, j] + P[j, i]) / 2.
+  final-round sampler distribution. This is **directional**: entry `P[i, j]` is
+  worker `i`'s converged bandit probability of sampling worker `j`. The graph is
+  therefore drawn as a directed graph with two opposite edges between each pair —
+  edge `i -> j` carries `P[i, j]` and edge `j -> i` carries `P[j, i]`, one per
+  node's own bandit.
 - `neighbor_disagreement`: uses `pairwise_model_distance_final.npy`. Edge weight
   is `1 / (1 + dist)` so closer (more agreeing) workers get heavier edges —
-  matching the bandit reward semantics.
+  matching the bandit reward semantics. Model distance is symmetric, so this mode
+  stays an undirected graph.
+
+Pass `threshold` to keep only edges whose weight exceeds it (e.g. drop the
+near-uniform exploration edges of an epsilon-greedy sampler), and/or
+`top_edges_per_node` to keep only each node's strongest outgoing edges.
 
 When the run's heterogeneity is `grouped_classes`, nodes are colored by group
 and laid out on concentric clusters; otherwise a spring layout is used.
@@ -57,8 +66,14 @@ def _worker_groups(cfg, n_honest: int) -> np.ndarray | None:
 
 def _load_weights(
     run_dir: pathlib.Path, weight_source: WeightSource, n_honest: int | None
-) -> np.ndarray:
-    """Return a symmetric (N, N) honest-worker weight matrix."""
+) -> tuple[np.ndarray, bool]:
+    """Return ``((N, N) honest-worker weight matrix, is_directed)``.
+
+    For ``sampler_probability`` the matrix is kept asymmetric — entry ``[i, j]``
+    is worker ``i``'s converged probability of sampling worker ``j`` (its own
+    bandit) — and is rendered as a directed graph. For ``neighbor_disagreement``
+    the matrix is a symmetric model-distance similarity (undirected).
+    """
     if weight_source == "sampler_probability":
         path = run_dir / "sampler_probabilities_final.npy"
         if not path.is_file():
@@ -66,7 +81,7 @@ def _load_weights(
         prob = np.load(path)  # (n_honest, n_total)
         n = prob.shape[0]
         honest_block = prob[:, :n]  # restrict to honest-honest edges
-        return 0.5 * (honest_block + honest_block.T)
+        return np.asarray(honest_block, dtype=float), True
     if weight_source == "neighbor_disagreement":
         path = run_dir / "pairwise_model_distance_final.npy"
         if not path.is_file():
@@ -74,8 +89,44 @@ def _load_weights(
         dist = np.load(path)
         if n_honest is not None:
             dist = dist[:n_honest, :n_honest]
-        return 1.0 / (1.0 + dist)
+        return 1.0 / (1.0 + dist), False
     raise ValueError(f"Unknown weight_source: {weight_source!r}")
+
+
+def _filter_edges(
+    weights: np.ndarray,
+    *,
+    directed: bool,
+    threshold: float | None = None,
+    top_edges_per_node: int | None = None,
+) -> np.ndarray:
+    """Zero out edges that fail the threshold / top-k filters.
+
+    - ``threshold``: keep only edges with weight strictly greater than it.
+    - ``top_edges_per_node``: keep only each node's ``k`` strongest *outgoing*
+      edges. For undirected graphs the kept mask is symmetrized so both
+      endpoints agree on the edge; for directed graphs each node keeps its own
+      outgoing edges independently.
+
+    Self-loops (the diagonal) are always removed. Returns a new matrix.
+    """
+    weights = np.array(weights, dtype=float)
+    np.fill_diagonal(weights, 0.0)
+    n = weights.shape[0]
+
+    if top_edges_per_node is not None and top_edges_per_node < n - 1:
+        keep = np.zeros_like(weights, dtype=bool)
+        for i in range(n):
+            order = np.argsort(weights[i])[::-1]
+            keep[i, order[:top_edges_per_node]] = True
+        if not directed:
+            keep = keep | keep.T
+        weights = weights * keep
+
+    if threshold is not None:
+        weights = np.where(weights > threshold, weights, 0.0)
+
+    return weights
 
 
 def _grouped_layout(groups: np.ndarray) -> dict[int, tuple[float, float]]:
@@ -109,14 +160,17 @@ def plot_clustering_graph(
     output_path: pathlib.Path,
     *,
     weight_source: WeightSource = "sampler_probability",
+    threshold: float | None = None,
     top_edges_per_node: int | None = None,
     layout: Literal["auto", "spring", "group"] = "auto",
     title: str | None = None,
 ) -> pathlib.Path:
     """Render and save the weighted clustering graph for `run_dir`.
 
-    `top_edges_per_node` keeps only the k strongest outgoing edges per node so
-    the plot stays readable for dense N. Pass None to keep all edges.
+    `threshold` keeps only edges whose weight exceeds it (e.g. drop near-uniform
+    exploration edges). `top_edges_per_node` keeps only the k strongest outgoing
+    edges per node so the plot stays readable for dense N. Both default to None
+    (keep all edges) and compose when both are set.
     """
     run_dir = pathlib.Path(run_dir)
     output_path = pathlib.Path(output_path)
@@ -128,19 +182,17 @@ def plot_clustering_graph(
         nb_byz = int(OmegaConf.select(cfg, "adversary.byzcount") or 0)
         n_honest = nb_workers - nb_byz
 
-    weights = _load_weights(run_dir, weight_source, n_honest)
+    weights, directed = _load_weights(run_dir, weight_source, n_honest)
     n = weights.shape[0]
-    np.fill_diagonal(weights, 0.0)
+    weights = _filter_edges(
+        weights,
+        directed=directed,
+        threshold=threshold,
+        top_edges_per_node=top_edges_per_node,
+    )
 
-    if top_edges_per_node is not None and top_edges_per_node < n - 1:
-        keep = np.zeros_like(weights, dtype=bool)
-        for i in range(n):
-            order = np.argsort(weights[i])[::-1]
-            keep[i, order[:top_edges_per_node]] = True
-        keep = keep | keep.T
-        weights = weights * keep
-
-    graph = nx.from_numpy_array(weights)
+    create_using = nx.DiGraph if directed else nx.Graph
+    graph = nx.from_numpy_array(weights, create_using=create_using)
     groups = _worker_groups(cfg, n) if cfg is not None else None
     if layout == "group" or (layout == "auto" and groups is not None):
         if groups is None:
@@ -161,7 +213,21 @@ def plot_clustering_graph(
         edge_widths = 0.5
         norm = None
 
+    node_size = 260
     fig, ax = plt.subplots(figsize=(8, 8))
+    # For a directed graph draw arrowheads and curve the edges so the two
+    # opposite-direction edges between a pair of nodes don't overlap.
+    directed_edge_kwargs = (
+        dict(
+            arrows=True,
+            arrowstyle="-|>",
+            arrowsize=11,
+            connectionstyle="arc3,rad=0.12",
+            node_size=node_size,
+        )
+        if directed
+        else {}
+    )
     nx.draw_networkx_edges(
         graph,
         pos,
@@ -170,12 +236,13 @@ def plot_clustering_graph(
         edge_color=edge_colors,
         alpha=0.85,
         ax=ax,
+        **directed_edge_kwargs,
     )
     nx.draw_networkx_nodes(
         graph,
         pos,
         node_color=_node_colors(groups, n),
-        node_size=260,
+        node_size=node_size,
         edgecolors="black",
         linewidths=0.6,
         ax=ax,
@@ -200,5 +267,5 @@ def plot_clustering_graph(
 
 def _edge_label(weight_source: WeightSource) -> str:
     if weight_source == "sampler_probability":
-        return "Symmetrized sampler probability (final round)"
+        return "Sampler probability P(i → j), final round"
     return "1 / (1 + final model L2 distance)"
