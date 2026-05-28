@@ -1,3 +1,4 @@
+.DS_store
 .hydra_runs/
 .hydra_multirun/
 results*/
