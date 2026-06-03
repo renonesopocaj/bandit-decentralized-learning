@@ -101,6 +101,7 @@ class HonestWorker(BaseWorker):
         self.nb_local_steps = nb_local_steps
         self.num_selected_byz = []
         self._current_step = 0
+        self.last_gradient_norm = float("nan")
 
     def sample_batch(self, mode):
         try:
@@ -152,9 +153,14 @@ class HonestWorker(BaseWorker):
         self.optimizer.step()
 
     def perform_local_step(self, current_step):
+        gradient_norms = []
         for _ in range(self.nb_local_steps):
-            self.set_gradient(self.compute_momentum())
+            gradient = self.compute_momentum()
+            gradient_norms.append(float(gradient.norm().detach().cpu().item()))
+            self.set_gradient(gradient)
             self.local_model_update(current_step)
+        if gradient_norms:
+            self.last_gradient_norm = sum(gradient_norms) / len(gradient_norms)
         return flatten(self.model.parameters())
 
     def train(self) -> None:

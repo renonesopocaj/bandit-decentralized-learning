@@ -48,6 +48,10 @@ class Panel:
     ylabel: str
     series: Sequence[Series]
     ylim: tuple[float, float] | None = None
+    xlabel: str = "Round"
+    xscale: str = "linear"
+    yscale: str = "linear"
+    x_offset: float = 0.0
 
 
 def _extract_run_hparams(label: str) -> str | None:
@@ -106,8 +110,10 @@ class StandardPlotter:
             ax.set_ylabel(panel.ylabel)
             if panel.ylim is not None:
                 ax.set_ylim(*panel.ylim)
+            ax.set_xscale(panel.xscale)
+            ax.set_yscale(panel.yscale)
             if idx == len(panels) - 1:
-                ax.set_xlabel("Round")
+                ax.set_xlabel(panel.xlabel)
             if idx == 0:
                 caption = _extract_run_hparams(self.run_label)
                 if caption:
@@ -155,12 +161,18 @@ class StandardPlotter:
             if series.transform is not None:
                 values = series.transform(values)
             y = self._aggregate(values, series)
+            x = data.x.astype(float) + panel.x_offset
+            if panel.xscale == "log" or panel.yscale == "log":
+                y = np.asarray(y, dtype=float)
+                x = np.asarray(x, dtype=float)
+                y = np.where(y > 0, y, np.nan)
+                x = np.where(x > 0, x, np.nan)
             color = series.color or NODE_CURVE_COLORS.get(series.label)
             linestyle = NODE_LINESTYLE.get(series.label, series.linestyle)
             marker = NODE_MARKERS.get(series.label, "o" if series.marker else None)
             linewidth = NODE_LINEWIDTH.get(series.label, 1.7)
             ax.plot(
-                data.x,
+                x,
                 y,
                 marker=marker,
                 linewidth=linewidth,
@@ -168,7 +180,7 @@ class StandardPlotter:
                 linestyle=linestyle,
                 label=series.label,
             )
-            _mark_first_nonfinite(ax, data.x, y)
+            _mark_first_nonfinite(ax, x, y)
 
     @staticmethod
     def _aggregate(values: np.ndarray, series: Series) -> np.ndarray:
@@ -225,6 +237,22 @@ def _sampler_aggressiveness_panels() -> list[Panel]:
     ]
 
 
+def _gradient_norm_loglog_panel() -> Panel:
+    return Panel(
+        "Gradient Norm Decay",
+        "Gradient norm",
+        [
+            Series(MetricKey.GRADIENT_NORMS, "average", mean),
+            Series(MetricKey.GRADIENT_NORMS, "worst", max_, color="red", marker=False),
+            Series(MetricKey.GRADIENT_NORMS, "best", min_, color="green", marker=False),
+        ],
+        xlabel="Round + 1",
+        xscale="log",
+        yscale="log",
+        x_offset=1.0,
+    )
+
+
 def plot_all(run_dir: Path, plots_dir: Path, run_label: str) -> None:
     plotter = StandardPlotter(run_dir, plots_dir, run_label)
 
@@ -277,6 +305,8 @@ def plot_all(run_dir: Path, plots_dir: Path, run_label: str) -> None:
             )
         ],
     )
+
+    plotter.plot("gradient_norm_loglog.png", [_gradient_norm_loglog_panel()])
 
     plotter.plot(
         "sampler_aggressiveness.png",

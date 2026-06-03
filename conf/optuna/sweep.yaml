@@ -1,6 +1,8 @@
 n_trials: 20
 direction: maximize
 output_dir: .optuna_runs
+# Each Optuna trial is one non-seed configuration. The top-level `num_seeds`
+# flag controls repeated runs for that configuration and is not a search axis.
 search_space:
   heterogeneity.alpha:
     type: float

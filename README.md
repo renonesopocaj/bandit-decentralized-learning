@@ -23,10 +23,15 @@ uv run -m banditdl
 Example overrides:
 
 ```bash
-uv run -m banditdl dataset=mnist topology=dynamic sampler=uniform topology.nodes=100 topology.sampling=0.05 seed=0
+uv run -m banditdl dataset=mnist topology=dynamic sampler=uniform topology.nodes=100 topology.sampling=0.05 seed=0 num_seeds=3
 ```
 
-Runs print lightweight progress to stdout: start metadata, result directory, periodic decentralized-learning rounds, evaluation accuracy when available, and completion.
+Each configured trial runs `num_seeds` consecutive seeds: `seed`, `seed + 1`,
+and so on. Public artifacts under `results/` are seed-averaged; raw per-seed
+artifacts are kept under `results/seeds/seed_<value>/results/`. Runs print
+lightweight progress to stdout: start metadata, result directory, periodic
+decentralized-learning rounds, evaluation accuracy when available, and
+completion.
 
 ## Local Hydra Override
 
@@ -42,6 +47,7 @@ defaults:
   - override /adversary: none
 
 seed: 0
+num_seeds: 3
 device: mps
 
 hydra:
@@ -67,9 +73,9 @@ Defaults (`conf/sweep.yaml`) compose `conf/config.yaml` plus `conf/optuna/sanity
 
 Behavior:
 - Enumerates every valid Cartesian combination of **categorical** `optuna.search_space` entries (respecting optional `when:` guards).
-- Queues each combo via Optuna `enqueue_trial`, runs one training job per trial.
-- Writes trial artifacts under `<hydra_run>/trials/<param_tokens>/results/` (numpy arrays mirror standard runs).
-- Tracks validation accuracy from `results/validation`, selects the best trial, then re-runs it once with test evaluation under `<hydra_run>/best_trial_test_eval/results`.
+- Runs one Optuna trial per non-seed configuration and repeats that configuration `num_seeds` times.
+- Writes seed-averaged trial artifacts under `<hydra_run>/trials/<param_tokens>/results/` and raw seed artifacts under that directory's `seeds/` subfolder.
+- Tracks mean validation accuracy across seeds, selects the best trial, then re-runs all of its seeds with test evaluation under `<hydra_run>/best_trial_test_eval/results`.
 - After all trials finish, renders default sweep plots under `<hydra_run>/sweep_artifacts/`.
 
 Sweep plotting is intentionally defined in Python, not YAML. The default sweep plot set lives in `banditdl/utils/plot_sweep_base.py` and currently generates:
@@ -80,9 +86,10 @@ Sweep plotting is intentionally defined in Python, not YAML. The default sweep p
 | `all_together` | WAY 1 style overlays (`banditdl/utils/plot_sweep_alltogether.py`). |
 | `heatmap` | Pairwise heatmaps (`banditdl/utils/plot_sweep_heatmap.py`). |
 
-Default sweep reductions over timesteps and nodes:
-- `avg`: arithmetic mean over all timesteps and all nodes.
-- `worse`: worst observed value across timesteps and nodes; uses max for
+Default sweep reductions over timesteps and nodes are computed per seed first,
+then averaged across seeds:
+- `avg`: arithmetic mean over all timesteps and all nodes inside each seed.
+- `worse`: worst observed value inside each seed; uses max for
   metrics where higher is worse (`regret`, `normalized_regret`,
   `neighbor_disagreement`, `consensus_drift`, `validation_losses`,
   `train_losses`) and min otherwise (accuracies, rewards).
@@ -120,7 +127,8 @@ uv run -m banditdl -m \
   dataset=mnist \
   topology=dynamic \
   sampler=uniform,bandit \
-  seed=0,1 \
+  seed=0 \
+  num_seeds=3 \
   topology.nodes=50,100 \
   topology.sampling=0.03,0.05 \
   sampler.params.epsilon=0.1,0.3 \
@@ -167,7 +175,8 @@ uv run -m banditdl --cfg job
 - `heterogeneity`: data heterogeneity config group.
 - `optimization`: local optimizer/training schedule config group.
 - `evaluation`: evaluation cadence config group.
-- `seed`: random seed. Use comma-separated values under `-m` for sweeps.
+- `seed`: base random seed for one configured trial.
+- `num_seeds`: number of consecutive seeds to run for each configured trial. Metrics and plots aggregate seed results as the outermost reduction.
 - `device`: `auto`, `cpu`, or a torch device string such as `cuda`.
 
 ### Dataset Config
@@ -247,10 +256,13 @@ uv run -m banditdl -m \
   topology.nodes=50,100 \
   topology.sampling=0.03,0.05 \
   adversary=none \
-  seed=0,1,2
+  seed=0 \
+  num_seeds=3
 ```
 
 Hydra takes the Cartesian product of comma-separated override values.
+Sweep `seed` only when you want separate base-seed trials; use `num_seeds` for
+seed averaging within each trial.
 
 ## How To Create A New Experiment
 
@@ -518,6 +530,7 @@ Dynamic runs also save hindsight diagnostics for every sampler, including unifor
 - `regret.npy`: `reward_oracle - reward_algorithm`.
 - time-averaged regret is derived from `regret.npy` when plotting.
 - `reward_selected_min.npy`: per-round, per-node minimum reward among selected neighbors.
+- `gradient_norms.npy`: per-round, per-node norm of the applied local gradient update; `plots/gradient_norm_loglog.png` shows average, worst, and best curves on log-log axes.
 - `reward_selected_max.npy`: per-round, per-node maximum reward among selected neighbors.
 - `selected_neighbors.npy`: sampled neighbors per round and worker.
 - `oracle_neighbors.npy`: best fixed hindsight neighbors per round and worker.

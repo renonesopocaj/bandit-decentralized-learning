@@ -376,10 +376,10 @@ def run_dynamic(params: dict, result_dir: pathlib.Path, seed: int, device: str) 
     make_result_file(fd_validation_loss, ["Step number", "Cross-loss"])
     make_result_file(fd_train_loss, ["Step number", "Cross-loss"])
 
-    validation_steps = []
-    validation_accuracies = []
-    validation_losses = []
-    train_losses = []
+    validation_steps: list[int] = []
+    validation_accuracies: list[list[float]] = []
+    validation_losses: list[list[float]] = []
+    train_losses: list[list[float]] = []
     cumulative_arm_rewards = np.zeros((args.nb_honests, args.nb_workers))
     cumulative_algorithm_rewards = np.zeros(args.nb_honests)
     algorithm_reward_history = []
@@ -393,6 +393,7 @@ def run_dynamic(params: dict, result_dir: pathlib.Path, seed: int, device: str) 
     sampler_max_probability_history = []
     selected_reward_min_history = []
     selected_reward_max_history = []
+    gradient_norm_history = []
 
     for current_step in range(args.rounds + 1):
         mean_validation_accuracy = None
@@ -427,6 +428,9 @@ def run_dynamic(params: dict, result_dir: pathlib.Path, seed: int, device: str) 
 
         for w in workers:
             w.train()
+        gradient_norm_history.append(
+            np.array([w.last_gradient_norm for w in workers], dtype=float)
+        )
         honest_weights = [w.pull(None) for w in workers]
 
         selected_round = np.full(
@@ -487,7 +491,7 @@ def run_dynamic(params: dict, result_dir: pathlib.Path, seed: int, device: str) 
             neighbor_matrix = selected_round.copy()
             neighbor_matrix[neighbor_matrix >= args.nb_honests] = -1
             disagreement = neighbor_disagreement(
-                updated_weights, neighbor_indices=neighbor_matrix
+                updated_weights, neighbor_indices=neighbor_matrix.tolist()
             )
             consensus = consensus_drift(updated_weights)
         neighbor_disagreement_history.append(disagreement.cpu().numpy())
@@ -600,6 +604,10 @@ def run_dynamic(params: dict, result_dir: pathlib.Path, seed: int, device: str) 
     np.save(
         os.path.join(result_dir, "sampler_max_probability.npy"),
         np.array(sampler_max_probability_history),
+    )
+    np.save(
+        os.path.join(result_dir, "gradient_norms.npy"),
+        np.array(gradient_norm_history),
     )
 
     sampler_probabilities_final = np.stack(
@@ -734,12 +742,13 @@ def run_fixed(params: dict, result_dir: pathlib.Path, seed: int, device: str) ->
     make_result_file(fd_validation_loss, ["Step number", "Cross-loss"])
     make_result_file(fd_train_loss, ["Step number", "Cross-loss"])
 
-    validation_steps = []
-    validation_accuracies = []
-    validation_losses = []
-    train_losses = []
+    validation_steps: list[int] = []
+    validation_accuracies: list[list[float]] = []
+    validation_losses: list[list[float]] = []
+    train_losses: list[list[float]] = []
     neighbor_disagreement_history = []
     consensus_drift_history = []
+    gradient_norm_history = []
     for current_step in range(args.rounds + 1):
         mean_validation_accuracy = None
         mean_validation_loss = None
@@ -773,6 +782,9 @@ def run_fixed(params: dict, result_dir: pathlib.Path, seed: int, device: str) ->
 
         for w in workers:
             w.train()
+        gradient_norm_history.append(
+            np.array([w.last_gradient_norm for w in workers], dtype=float)
+        )
         honest_weights = [w.pull(None) for w in workers]
 
         for w in workers:
@@ -867,6 +879,10 @@ def run_fixed(params: dict, result_dir: pathlib.Path, seed: int, device: str) ->
     np.save(
         os.path.join(result_dir, "consensus_drift.npy"),
         np.array(consensus_drift_history),
+    )
+    np.save(
+        os.path.join(result_dir, "gradient_norms.npy"),
+        np.array(gradient_norm_history),
     )
     with torch.no_grad():
         final_weights = torch.stack([w.pull(None) for w in workers])

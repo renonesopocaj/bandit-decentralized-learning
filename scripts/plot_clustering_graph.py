@@ -4,9 +4,8 @@ Usage:
     uv run python scripts/plot_clustering_graph.py <run_dir> [<run_dir> ...] \
         --weight sampler_probability --top-edges 4
 
-Looks for `results/sampler_probabilities_final.npy` and
-`results/pairwise_model_distance_final.npy` written by the engine; writes a PNG
-under each run's `plots/` directory.
+Looks for seed-averaged final arrays or their `*_by_seed.npy` companions
+written by the engine; writes a PNG under each run's `plots/` directory.
 """
 
 from __future__ import annotations

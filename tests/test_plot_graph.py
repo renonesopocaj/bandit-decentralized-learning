@@ -83,6 +83,40 @@ def test_load_weights_sampler_probability_is_directed_and_unsymmetrized(tmp_path
     assert weights[0, 1] != weights[1, 0]
 
 
+def test_load_weights_sampler_probability_averages_seed_probabilities(tmp_path):
+    results = tmp_path / "results"
+    results.mkdir()
+    prob_by_seed = np.array(
+        [
+            [[0.0, 0.8], [0.2, 0.0]],
+            [[0.0, 0.4], [0.6, 0.0]],
+        ]
+    )
+    np.save(results / "sampler_probabilities_final_by_seed.npy", prob_by_seed)
+
+    weights, directed = _load_weights(results, "sampler_probability", n_honest=2)
+
+    assert directed is True
+    np.testing.assert_allclose(weights, np.array([[0.0, 0.6], [0.4, 0.0]]))
+
+
+def test_load_weights_neighbor_disagreement_averages_seed_similarities(tmp_path):
+    results = tmp_path / "results"
+    results.mkdir()
+    dist_by_seed = np.array(
+        [
+            [[0.0, 1.0], [1.0, 0.0]],
+            [[0.0, 3.0], [3.0, 0.0]],
+        ]
+    )
+    np.save(results / "pairwise_model_distance_final_by_seed.npy", dist_by_seed)
+
+    weights, directed = _load_weights(results, "neighbor_disagreement", n_honest=2)
+
+    assert directed is False
+    np.testing.assert_allclose(weights, np.array([[1.0, 0.375], [0.375, 1.0]]))
+
+
 def test_plot_clustering_graph_directed_render(tmp_path):
     results = tmp_path / "results"
     results.mkdir()

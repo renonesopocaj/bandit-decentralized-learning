@@ -1,7 +1,8 @@
 """Cluster-formation analysis for bandit-sampler runs on grouped pathological partitions.
 
-Reads `selected_neighbors.npy` from one or more Hydra run folders and computes whether
-each worker's converged neighbor selections concentrate inside its own label group.
+Reads `selected_neighbors.npy` or `selected_neighbors_by_seed.npy` from one or
+more Hydra run folders and computes whether each worker's converged neighbor
+selections concentrate inside its own label group.
 
 Usage:
     uv run python scripts/analyze_clustering.py <run_dir> [<run_dir> ...] \
@@ -45,6 +46,17 @@ def worker_to_group(nb_workers: int, nb_groups: int) -> np.ndarray:
 
 
 def cluster_purity(selected: np.ndarray, worker_group: np.ndarray, tail: int) -> np.ndarray:
+    if selected.ndim == 4:
+        per_seed = np.stack(
+            [_cluster_purity_one_seed(seed_selected, worker_group, tail) for seed_selected in selected]
+        )
+        return np.nanmean(per_seed, axis=0)
+    if selected.ndim != 3:
+        raise ValueError("selected must have shape (T, N, k) or (S, T, N, k)")
+    return _cluster_purity_one_seed(selected, worker_group, tail)
+
+
+def _cluster_purity_one_seed(selected: np.ndarray, worker_group: np.ndarray, tail: int) -> np.ndarray:
     # selected: (T, N, k) ints; -1 = no pick.
     selected_tail = selected[-tail:]
     purities = np.full(selected_tail.shape[1], np.nan)
@@ -82,7 +94,8 @@ def parse_run(run_dir: pathlib.Path, partition: str, tail: int):
     sampling = float(cfg.topology.sampling)
     seed = int(cfg.seed)
     nb_workers = int(cfg.topology.nodes)
-    selected_path = run_dir / "results" / "selected_neighbors.npy"
+    by_seed_path = run_dir / "results" / "selected_neighbors_by_seed.npy"
+    selected_path = by_seed_path if by_seed_path.is_file() else run_dir / "results" / "selected_neighbors.npy"
     if not selected_path.is_file():
         print(f"[skip] {run_dir}: missing {selected_path}")
         return None

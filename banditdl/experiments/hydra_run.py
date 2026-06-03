@@ -8,6 +8,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from banditdl.experiments.config_adapter import build_engine_config, resolve_device
 from banditdl.experiments.engine import run_dynamic, run_fixed
+from banditdl.utils.seed_averaging import run_seed_averaged
 from banditdl.utils.plotting import plot_all
 
 
@@ -19,20 +20,15 @@ def main(cfg: DictConfig) -> None:
 
     output_dir = pathlib.Path(HydraConfig.get().runtime.output_dir)
     result_dir = output_dir / "results"
-    if run_cfg.run_mode == "dynamic":
-        run_dynamic(
-            params=run_cfg.params,
-            result_dir=result_dir,
-            seed=int(cfg.seed),
-            device=device,
-        )
-    else:
-        run_fixed(
-            params=run_cfg.params,
-            result_dir=result_dir,
-            seed=int(cfg.seed),
-            device=device,
-        )
+    run_once = run_dynamic if run_cfg.run_mode == "dynamic" else run_fixed
+    run_seed_averaged(
+        run_once=run_once,
+        params=run_cfg.params,
+        result_dir=result_dir,
+        base_seed=int(cfg.seed),
+        num_seeds=int(cfg.num_seeds),
+        device=device,
+    )
 
     plot_all(
         run_dir=result_dir,

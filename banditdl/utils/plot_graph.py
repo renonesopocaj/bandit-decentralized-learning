@@ -2,16 +2,18 @@
 
 Two edge-weight modes:
 
-- `sampler_probability`: uses `sampler_probabilities_final.npy`, the per-worker
-  final-round sampler distribution. This is **directional**: entry `P[i, j]` is
-  worker `i`'s converged bandit probability of sampling worker `j`. The graph is
-  therefore drawn as a directed graph with two opposite edges between each pair —
-  edge `i -> j` carries `P[i, j]` and edge `j -> i` carries `P[j, i]`, one per
-  node's own bandit.
-- `neighbor_disagreement`: uses `pairwise_model_distance_final.npy`. Edge weight
-  is `1 / (1 + dist)` so closer (more agreeing) workers get heavier edges —
-  matching the bandit reward semantics. Model distance is symmetric, so this mode
-  stays an undirected graph.
+- `sampler_probability`: uses `sampler_probabilities_final.npy` or
+  `sampler_probabilities_final_by_seed.npy`, the per-worker final-round sampler
+  distribution. This is **directional**: entry `P[i, j]` is worker `i`'s
+  converged bandit probability of sampling worker `j`. The graph is therefore
+  drawn as a directed graph with two opposite edges between each pair — edge
+  `i -> j` carries `P[i, j]` and edge `j -> i` carries `P[j, i]`, one per node's
+  own bandit.
+- `neighbor_disagreement`: uses `pairwise_model_distance_final.npy` or
+  `pairwise_model_distance_final_by_seed.npy`. Edge weight is `1 / (1 + dist)`
+  so closer (more agreeing) workers get heavier edges — matching the bandit
+  reward semantics. Model distance is symmetric, so this mode stays an
+  undirected graph.
 
 Pass `threshold` to keep only edges whose weight exceeds it (e.g. drop the
 near-uniform exploration edges of an epsilon-greedy sampler), and/or
@@ -29,7 +31,7 @@ from typing import Literal
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
-import networkx as nx
+import networkx as nx  # type: ignore[import-untyped]
 import numpy as np
 from omegaconf import OmegaConf
 
@@ -75,21 +77,31 @@ def _load_weights(
     the matrix is a symmetric model-distance similarity (undirected).
     """
     if weight_source == "sampler_probability":
+        by_seed_path = run_dir / "sampler_probabilities_final_by_seed.npy"
         path = run_dir / "sampler_probabilities_final.npy"
-        if not path.is_file():
+        if by_seed_path.is_file():
+            prob = np.nanmean(np.load(by_seed_path), axis=0)
+        elif path.is_file():
+            prob = np.load(path)
+        else:
             raise FileNotFoundError(f"Missing {path}")
-        prob = np.load(path)  # (n_honest, n_total)
         n = prob.shape[0]
         honest_block = prob[:, :n]  # restrict to honest-honest edges
         return np.asarray(honest_block, dtype=float), True
     if weight_source == "neighbor_disagreement":
+        by_seed_path = run_dir / "pairwise_model_distance_final_by_seed.npy"
         path = run_dir / "pairwise_model_distance_final.npy"
-        if not path.is_file():
-            raise FileNotFoundError(f"Missing {path}")
-        dist = np.load(path)
-        if n_honest is not None:
-            dist = dist[:n_honest, :n_honest]
-        return 1.0 / (1.0 + dist), False
+        if by_seed_path.is_file():
+            dist_by_seed = np.load(by_seed_path)
+            if n_honest is not None:
+                dist_by_seed = dist_by_seed[:, :n_honest, :n_honest]
+            return np.nanmean(1.0 / (1.0 + dist_by_seed), axis=0), False
+        if path.is_file():
+            dist = np.load(path)
+            if n_honest is not None:
+                dist = dist[:n_honest, :n_honest]
+            return 1.0 / (1.0 + dist), False
+        raise FileNotFoundError(f"Missing {path}")
     raise ValueError(f"Unknown weight_source: {weight_source!r}")
 
 
@@ -204,9 +216,10 @@ def plot_clustering_graph(
 
     edges = list(graph.edges(data="weight"))
     edge_weights = np.array([w for _, _, w in edges]) if edges else np.array([])
+    edge_cmap = plt.get_cmap("viridis")
     if edges and edge_weights.max() > 0:
         norm = mcolors.Normalize(vmin=0.0, vmax=float(edge_weights.max()))
-        edge_colors = cm.viridis(norm(edge_weights))
+        edge_colors = edge_cmap(norm(edge_weights))
         edge_widths = 0.4 + 3.5 * edge_weights / edge_weights.max()
     else:
         edge_colors = "lightgray"
@@ -250,7 +263,7 @@ def plot_clustering_graph(
     nx.draw_networkx_labels(graph, pos, font_size=7, ax=ax)
 
     if norm is not None:
-        sm = cm.ScalarMappable(norm=norm, cmap=cm.viridis)
+        sm = cm.ScalarMappable(norm=norm, cmap=edge_cmap)
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=ax, shrink=0.7)
         cbar.set_label(_edge_label(weight_source))

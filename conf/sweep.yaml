@@ -10,9 +10,9 @@ plot_mode:
   - all_together
   - heatmap
 
-# avg = mean over all saved timesteps/nodes.
-# worse = worst scalar for the metric, using max for losses/regret/drift and
-# min for accuracy-like metrics.
+# avg = mean over saved timesteps/nodes inside each seed, then mean over seeds.
+# worse = worst scalar inside each seed, using max for losses/regret/drift and
+# min for accuracy-like metrics, then mean over seeds.
 direction:
   - avg
   - worse
@@ -27,3 +27,4 @@ plot_metrics:
   - normalized_regret
   - neighbor_disagreement
   - consensus_drift
+  - gradient_norms
