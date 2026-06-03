@@ -30,7 +30,7 @@ DEFAULT_PLOT_METRICS: tuple[str, ...] = (
     "consensus_drift",
     "gradient_norms",
 )
-DEFAULT_DIRECTIONS: tuple[str, ...] = ("avg", "worse")
+DEFAULT_DIRECTIONS: tuple[str, ...] = ("avg", "worse", "best")
 DEFAULT_PLOT_MODES: tuple[str, ...] = ("per_parameter", "all_together", "heatmap")
 
 _DIRECTION_ALIASES = {
@@ -39,6 +39,7 @@ _DIRECTION_ALIASES = {
     "average": "avg",
     "worse": "worse",
     "worst": "worse",
+    "best": "best",
 }
 
 
@@ -46,7 +47,7 @@ def normalize_direction(value):
     token = str(value).lower().strip()
     if token not in _DIRECTION_ALIASES:
         raise ValueError(
-            f"Unsupported direction '{value}'. Allowed: avg, mean, average, worse, worst."
+            f"Unsupported direction '{value}'. Allowed: avg, mean, average, worse, worst, best."
         )
     return _DIRECTION_ALIASES[token]
 
@@ -292,7 +293,7 @@ def scalar_for_direction(metric_name, array_values, direction):
         array_values: np.ndarray
             Metric array with seed as axis 0.
         direction: str
-            Canonical direction name, either `avg` or `worse`.
+            Canonical direction name, either `avg`, `worse`, or `best`.
         return: float
             Mean across seeds of the per-seed scalar reduction.
     """

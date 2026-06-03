@@ -311,7 +311,7 @@ def scalar_reduce_seed_outer(metric: MetricKey | str, values: np.ndarray, direct
             Metric values with seed as axis 0 and all inner axes belonging to a
             single run.
         direction: str
-            Reduction direction, either `avg` or `worse`.
+            Reduction direction, either `avg`, `worse`, or `best`.
         return: float
             Mean across seeds of the per-seed scalar reduction.
     """
@@ -330,5 +330,13 @@ def scalar_reduce_seed_outer(metric: MetricKey | str, values: np.ndarray, direct
             per_seed = np.nanmax(values, axis=inner_axes)
         else:
             per_seed = np.nanmin(values, axis=inner_axes)
+        return float(np.nanmean(per_seed))
+    if direction == "best":
+        if not inner_axes:
+            per_seed = values
+        elif key in HIGHER_IS_WORSE:
+            per_seed = np.nanmin(values, axis=inner_axes)
+        else:
+            per_seed = np.nanmax(values, axis=inner_axes)
         return float(np.nanmean(per_seed))
     raise ValueError(f"Unsupported direction: {direction}")

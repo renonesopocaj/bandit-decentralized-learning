@@ -2,6 +2,7 @@ import pytest
 import numpy as np
 
 from banditdl.utils.metrics import MetricKey, MetricLoader, TimeAverage, min_, scalar_reduce_seed_outer
+from banditdl.utils.plot_sweep_base import normalize_directions
 
 
 def test_normalized_regret_is_derived_from_regret(tmp_path):
@@ -90,6 +91,38 @@ def test_scalar_worse_reduction_averages_per_seed_worst_values():
     reduced = scalar_reduce_seed_outer(MetricKey.VALIDATION_LOSSES, values, "worse")
 
     assert reduced == pytest.approx(52.0)
+
+
+def test_scalar_best_reduction_uses_opposite_extreme_for_loss_metrics():
+    values = np.array(
+        [
+            [[1.0, 2.0], [3.0, 4.0]],
+            [[100.0, 0.0], [0.0, 0.0]],
+        ]
+    )
+
+    reduced = scalar_reduce_seed_outer(MetricKey.VALIDATION_LOSSES, values, "best")
+
+    assert reduced == pytest.approx(0.5)
+
+
+def test_scalar_best_reduction_uses_opposite_extreme_for_accuracy_metrics():
+    values = np.array(
+        [
+            [[0.1, 0.2], [0.3, 0.4]],
+            [[0.9, 0.0], [0.2, 0.1]],
+        ]
+    )
+
+    reduced = scalar_reduce_seed_outer(MetricKey.VALIDATION_ACCURACIES, values, "best")
+
+    assert reduced == pytest.approx(0.65)
+
+
+def test_sweep_direction_normalization_accepts_best_and_keeps_order():
+    directions = normalize_directions(["worst", "best", "avg", "best"])
+
+    assert directions == ["worse", "best", "avg"]
 
 
 def test_time_average_uses_time_axis_after_seed_axis():

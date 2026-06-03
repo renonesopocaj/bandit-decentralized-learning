@@ -19,7 +19,7 @@ class AllTogetherPlotter(BaseSweepPlotter):
           metric: str
             Metric stem name.
           direction: str
-            Canonical direction name (avg or worse).
+            Canonical direction name (avg, worse, or best).
           column_key: str
             Column key inside SweepRow.metrics.
         """
