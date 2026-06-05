@@ -57,13 +57,16 @@ hydra:
     dir: .hydra_multirun_override/${now:%Y-%m-%d}/${now:%H-%M-%S}
 ```
 
+Detailed config documentation lives in [docs/config.md](docs/config.md).
+Sweep-specific documentation lives in [docs/sweeps.md](docs/sweeps.md).
+
 ## Run Sweeps (Hydra Multirun)
 
 Hydra does orchestration. The custom in-repo scheduler is no longer the main path.
 
 ## Run Sweeps (Optuna)
 
-Launch categorical grid sweeps with Hydra output folders:
+Launch Optuna sweeps with Hydra output folders:
 
 ```bash
 uv run python -m banditdl.experiments.sweep
@@ -77,47 +80,56 @@ Behavior:
 - Respects optional `when:` guards for conditional parameters such as sampler-specific hyperparameters.
 - Runs one Optuna trial per non-seed configuration and repeats that configuration `num_seeds` times.
 - Writes seed-averaged trial artifacts under `<hydra_run>/trials/<param_tokens>/results/` and raw seed artifacts under that directory's `seeds/` subfolder.
+- Persists the Optuna study to `<hydra_run>/optuna.db` for offline sweep plotting.
 - Tracks mean validation accuracy across seeds, selects the best trial, then re-runs all of its seeds with test evaluation under `<hydra_run>/best_trial_test_eval/results`.
-- After all trials finish, renders default sweep plots under `<hydra_run>/sweep_artifacts/`.
+- If `plot.enabled: true`, renders configured sweep plots under `<hydra_run>/sweep_artifacts/`.
 
-Sweep plotting is intentionally defined in Python, not YAML. The default sweep plot set lives in `banditdl/utils/plot_sweep_base.py` and currently generates:
+Sweep plotting is controlled by `conf/sweep.yaml`:
 
-| Mode | Meaning |
-| --- | --- |
-| `per_parameter` | WAY 2 style curves (per-axis grids described in `banditdl/utils/plot_sweep_perparam.py`). |
-| `all_together` | WAY 1 style overlays (`banditdl/utils/plot_sweep_alltogether.py`). |
-| `heatmap` | Pairwise heatmaps (`banditdl/utils/plot_sweep_heatmap.py`). |
-
-Default sweep reductions over timesteps and nodes are computed per seed first,
-then averaged across seeds:
-- `avg`: arithmetic mean over all timesteps and all nodes inside each seed.
-- `worse`: worst observed value inside each seed; uses max for
-  metrics where higher is worse (`regret`, `normalized_regret`,
-  `neighbor_disagreement`, `consensus_drift`, `validation_losses`,
-  `train_losses`) and min otherwise (accuracies, rewards).
-- `best`: best observed value inside each seed; uses the opposite extrema of
-  `worse` (min for higher-is-worse metrics, max otherwise).
-
-Plot outputs are written under:
-
-```text
-<hydra_run>/sweep_artifacts/
-  per_parameter/direction=avg/...
-  per_parameter/direction=worse/...
-  per_parameter/direction=best/...
-  all_together/direction=avg/...
-  all_together/direction=worse/...
-  all_together/direction=best/...
-  heatmap/direction=avg/...
-  heatmap/direction=worse/...
-  heatmap/direction=best/...
+```yaml
+plot:
+  enabled: true
+  directions: [avg, worse]
+  heatmaps:
+    - x: heterogeneity.alpha
+      y: topology.sampling
+      group_by:
+        - sampler.name
+        - [sampler.name, sampler.params.epsilon]
+      aggregate_by: avg
+      render: [heatmap]
+      exclude_metrics: []
+  per_parameter:
+    enabled: false
+    exclude_metrics: []
 ```
 
-If a particular `(metric, mode, direction, fixed-axes)` combination has no
-plottable points (missing arrays or no matching trials), the plot is **skipped
-with a warning** instead of writing a blank PNG.
+Plotting rules:
+- Heatmaps are explicit; the plotter no longer generates every possible axis pair.
+- All known scalar metrics are plotted by default when present in result folders.
+- `exclude_metrics` removes metrics for a specific plot family/spec.
+- `direction` reduces a metric over timesteps/nodes: `avg` or `worse`.
+- `aggregate_by` reduces extra swept dimensions not used by `x`, `y`, or the active `group_by` slice: `avg`, `min`, or `max`.
+- `group_by` creates slices. A string creates one slice per value; a list creates one slice per value combination.
+- Heatmap color scales are shared across slices for the same heatmap spec,
+  metric, and direction.
+- `render` defaults to `[heatmap]`; add `heatmap3d` for experimental static
+  3D surfaces under `sweep_artifacts/heatmap3d/`.
+- `per_parameter` remains available but is disabled by default.
 
-To change sweep plots, edit the Python defaults or run a separate plotting script after the sweep. Experiment parameters and Optuna search spaces remain Hydra-controlled.
+Offline plotting can regenerate sweep plots without rerunning training:
+
+```bash
+uv run python scripts/plot_sweep.py .hydra_runs/<date>/<time>
+```
+
+Use a custom output directory if desired:
+
+```bash
+uv run python scripts/plot_sweep.py .hydra_runs/<date>/<time> --output-dir plots/my_sweep
+```
+
+For larger sweeps:
 
 ```bash
 uv run python -m banditdl.experiments.sweep optuna=sweep

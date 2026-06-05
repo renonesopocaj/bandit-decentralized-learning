@@ -12,17 +12,17 @@ from banditdl.experiments.config_adapter import build_engine_config, resolve_dev
 from banditdl.experiments.engine import run_dynamic, run_fixed
 from banditdl.utils.seed_averaging import run_seed_averaged, seed_result_dir
 from banditdl.utils.plot_sweep_base import (
+    STUDY_NAME,
     build_axis_metadata,
     enumerate_valid_param_dicts,
     _choices_from_spec,
     _conditions_met,
     _normalize_search_space,
+    optuna_storage_url,
+    plot_sweep_from_cfg,
     _strip_meta,
-    _when_clause,
-    normalize_directions,
-    normalize_plot_modes,
-    plot_sweep,
     trial_folder_name,
+    _when_clause,
 )
 
 
@@ -75,13 +75,14 @@ def _apply_trial_params(trial_cfg: DictConfig, trial_params: dict) -> None:
 def _objective_from_params(
     trial,
     base_cfg: DictConfig,
-    trials_root: Path,
+    output_root: Path,
     axis_lookup: dict,
     trial_params: dict,
 ) -> float:
     trial_cfg = _copy_dict_config(base_cfg)
     _apply_trial_params(trial_cfg, trial_params)
 
+    trials_root = output_root / "trials"
     folder_name = trial_folder_name(trial_params, axis_lookup)
     trial_result_dir = trials_root / folder_name / "results"
     trial_result_dir.mkdir(parents=True, exist_ok=True)
@@ -105,20 +106,20 @@ def _objective_from_params(
     trial.set_user_attr("validation_accuracy", validation_metric)
     trial.set_user_attr("validation_accuracy_by_seed", validation_by_seed)
     trial.set_user_attr("result_dir", str(trial_result_dir))
+    trial.set_user_attr("result_path", str(trial_result_dir.relative_to(output_root)))
     trial.set_user_attr("seeds", seeds)
     trial.set_user_attr("num_seeds", num_seeds)
     trial.set_user_attr("resolved_params", trial_params)
     return validation_metric
 
 
-def _objective_grid(trial, base_cfg: DictConfig, trials_root: Path, axis_lookup: dict, combos: list) -> float:
+def _objective_grid(trial, base_cfg: DictConfig, output_root: Path, axis_lookup: dict, combos: list) -> float:
     trial_index = int(trial.number)
     if trial_index >= len(combos):
         raise IndexError(
             f"Trial index {trial_index} out of bounds for {len(combos)} combinations"
         )
-    trial_params = dict(combos[trial_index])
-    return _objective_from_params(trial, base_cfg, trials_root, axis_lookup, trial_params)
+    return _objective_from_params(trial, base_cfg, output_root, axis_lookup, dict(combos[trial_index]))
 
 
 def _all_search_axes_categorical(search_space: dict) -> bool:
@@ -142,12 +143,11 @@ def _suggest_value(trial, path: str, spec):
             step=spec.get("step"),
         )
     if param_type == "int":
-        step = spec.get("step", 1)
         return trial.suggest_int(
             path,
             int(spec["low"]),
             int(spec["high"]),
-            step=int(step),
+            step=int(spec.get("step", 1)),
             log=bool(spec.get("log", False)),
         )
     raise ValueError(f"Unsupported Optuna search-space type for '{path}': {param_type!r}")
@@ -169,9 +169,9 @@ def _suggest_trial_params(trial, base_cfg: DictConfig, search_space: dict) -> di
     return trial_params
 
 
-def _objective_suggested(trial, base_cfg: DictConfig, trials_root: Path, axis_lookup: dict, search_space: dict) -> float:
+def _objective_suggested(trial, base_cfg: DictConfig, output_root: Path, axis_lookup: dict, search_space: dict) -> float:
     trial_params = _suggest_trial_params(trial, base_cfg, search_space)
-    return _objective_from_params(trial, base_cfg, trials_root, axis_lookup, trial_params)
+    return _objective_from_params(trial, base_cfg, output_root, axis_lookup, trial_params)
 
 
 def _run_best_trial_test_evaluation(best_trial, base_cfg: DictConfig, output_root: Path) -> float:
@@ -200,21 +200,17 @@ def _run_best_trial_test_evaluation(best_trial, base_cfg: DictConfig, output_roo
     return test_metric
 
 
-def _metrics_list_from_cfg(cfg: DictConfig) -> list[str]:
-    raw = cfg.get("plot_metrics")
-    if raw is None:
-        return []
-    values = OmegaConf.to_container(raw, resolve=True)
-    if not isinstance(values, list):
-        raise ValueError("plot_metrics must be a list")
-    return [str(value) for value in values]
+def _load_search_space(optuna_cfg) -> dict:
+    raw = OmegaConf.to_container(optuna_cfg.search_space, resolve=True)
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("optuna.search_space must be a non-empty mapping")
+    return {str(path): spec for path, spec in raw.items()}
 
 
 @hydra.main(version_base=None, config_path="../../conf", config_name="sweep")
 def main(cfg: DictConfig) -> None:
     output_root = Path(HydraConfig.get().runtime.output_dir)
-    trials_root = output_root / "trials"
-    trials_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "trials").mkdir(parents=True, exist_ok=True)
 
     if "optuna" not in cfg:
         raise ValueError("Missing 'optuna' section in Hydra config")
@@ -222,16 +218,17 @@ def main(cfg: DictConfig) -> None:
     if "search_space" not in optuna_cfg:
         raise ValueError("Missing 'optuna.search_space' in Hydra config")
 
-    raw_search_space = OmegaConf.to_container(optuna_cfg.search_space, resolve=True)
-    if not isinstance(raw_search_space, dict) or not raw_search_space:
-        raise ValueError("optuna.search_space must be a non-empty mapping")
-    search_space = {str(path): spec for path, spec in raw_search_space.items()}
-
+    search_space = _load_search_space(optuna_cfg)
     _, axis_meta = build_axis_metadata(search_space)
     axis_lookup = {path: axis_meta.get(path, {}) for path in search_space.keys()}
 
-    direction = str(optuna_cfg.direction)
-    study = optuna.create_study(direction=direction)
+    study = optuna.create_study(
+        direction=str(optuna_cfg.direction),
+        storage=optuna_storage_url(output_root),
+        study_name=STUDY_NAME,
+        load_if_exists=True,
+    )
+
     if _all_search_axes_categorical(search_space):
         combos = enumerate_valid_param_dicts(cfg, search_space)
         if not combos:
@@ -239,20 +236,20 @@ def main(cfg: DictConfig) -> None:
         total_trials = len(combos)
         print(
             f"[optuna] grid trials={total_trials} | seeds_per_trial={int(cfg.num_seeds)} | "
-            f"metric=validation_accuracy | trials_dir={trials_root}"
+            f"metric=validation_accuracy | trials_dir={output_root / 'trials'}"
         )
         study.optimize(
-            lambda trial: _objective_grid(trial, cfg, trials_root, axis_lookup, combos),
+            lambda trial: _objective_grid(trial, cfg, output_root, axis_lookup, combos),
             n_trials=total_trials,
         )
     else:
         total_trials = int(optuna_cfg.get("n_trials", 20))
         print(
             f"[optuna] sampled trials={total_trials} | seeds_per_trial={int(cfg.num_seeds)} | "
-            f"metric=validation_accuracy | trials_dir={trials_root}"
+            f"metric=validation_accuracy | trials_dir={output_root / 'trials'}"
         )
         study.optimize(
-            lambda trial: _objective_suggested(trial, cfg, trials_root, axis_lookup, search_space),
+            lambda trial: _objective_suggested(trial, cfg, output_root, axis_lookup, search_space),
             n_trials=total_trials,
         )
 
@@ -270,23 +267,8 @@ def main(cfg: DictConfig) -> None:
     print(f"[optuna] best trial final test directory: {output_root / 'best_trial_test_eval' / 'results'}")
     print(f"[optuna] best trial final test_accuracy: {final_test_accuracy:.6f}")
 
-    metrics_list = _metrics_list_from_cfg(cfg)
-    plot_modes = normalize_plot_modes(cfg.get("plot_mode"))
-    plot_directions = normalize_directions(cfg.get("direction"))
-    sweep_plot_root = output_root / "sweep_artifacts"
-    plot_sweep(
-        plot_modes,
-        plot_directions,
-        trials_root,
-        study,
-        search_space,
-        metrics_list,
-        sweep_plot_root,
-    )
-    print(
-        f"[optuna] sweep plots written to: {sweep_plot_root} | "
-        f"modes={plot_modes} directions={plot_directions}"
-    )
+    plot_sweep_from_cfg(output_root, cfg, study=study)
+    print(f"[optuna] sweep plots written to: {output_root / 'sweep_artifacts'}")
 
 
 if __name__ == "__main__":
