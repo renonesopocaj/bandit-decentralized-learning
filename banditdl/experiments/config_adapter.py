@@ -22,7 +22,6 @@ class EngineRunConfig:
         c = self.config
         is_dynamic = self.run_mode == "dynamic"
 
-        # Determine sampler settings
         sampler_name = c.sampler.get("name", c.topology.neighbor_sampler) if c.sampler else c.topology.neighbor_sampler
 
         return WorkerConfig(
@@ -39,6 +38,7 @@ class EngineRunConfig:
             nb_byz=c.adversary.byzcount,
             nb_real_byz=c.adversary.byzcount,
             b_hat=self.byzantine_budget,
+            attack=c.adversary.attack,
             rag=c.aggregator.rag or is_dynamic,
             numb_labels=c.dataset.numb_labels,
             labelflipping=c.adversary.attack == "LF",
@@ -107,6 +107,8 @@ def _run_name(c: BanditDLConfig, byz_budget: int, nb_neighbors: int) -> str:
 
 def _partition_token(c: BanditDLConfig) -> str:
     if c.dataset.mode == "writer_per_node":
+        if c.dataset.dataset != "femnist":
+            raise ValueError("dataset.mode='writer_per_node' is only valid for FEMNIST")
         cap = c.dataset.nb_writers_limit
         return "femnist_writers" if cap is None else f"femnist_writers_cap_{cap}"
 
@@ -114,7 +116,9 @@ def _partition_token(c: BanditDLConfig) -> str:
         return f"alpha_{c.heterogeneity.alpha}"
 
     if c.heterogeneity.method == "pathological":
-        style = c.heterogeneity.partition or ""
+        style = c.heterogeneity.partition
+        if style is None:
+            raise ValueError("heterogeneity.partition is required when method=pathological")
         if style == "classes_per_worker":
             return f"pathological_c_{c.heterogeneity.classes_per_worker}"
         if style == "shards_per_worker":

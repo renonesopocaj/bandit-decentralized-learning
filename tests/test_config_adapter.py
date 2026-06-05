@@ -42,6 +42,17 @@ def test_build_dynamic_engine_config_uses_sampler_group():
     assert run_cfg.config.optimization.rounds == 200
 
 
+def test_worker_config_receives_adversary_attack():
+    cfg = _base_cfg()
+    cfg.adversary.byzcount = 1
+    cfg.adversary.byzantine_budget = 1
+    cfg.adversary.attack = "ALIE"
+
+    worker_cfg = build_engine_config(cfg).to_worker_config("cpu")
+
+    assert worker_cfg.attack == "ALIE"
+
+
 def test_build_fixed_engine_config_uses_topology_method():
     cfg = _base_cfg()
     del cfg.topology.sampling
@@ -189,11 +200,8 @@ def test_build_engine_config_writer_mode_rejects_non_femnist():
     cfg = _base_cfg()
     cfg.dataset.mode = "writer_per_node"
 
-    # In strict schema mode, we might want to check this in build_engine_config
-    # For now, let's just make sure it doesn't crash if it's supposed to fail later
-    # or add validation in build_engine_config.
-    # The original test expected a ValueError.
-    pass
+    with pytest.raises(ValueError, match="writer_per_node"):
+        build_engine_config(cfg)
 
 
 def test_build_engine_config_pathological_rejects_missing_partition_style():
@@ -204,7 +212,5 @@ def test_build_engine_config_pathological_rejects_missing_partition_style():
         "alpha": None,
     })
 
-    # The current build_engine_config doesn't have the specific ValueError check anymore
-    # because it relies on the dataclass schema and default values.
-    # If partition is None, it just uses "" in _partition_token.
-    pass
+    with pytest.raises(ValueError, match="partition"):
+        build_engine_config(cfg)

@@ -23,6 +23,7 @@ class WorkerConfig:
     nb_byz: int
     nb_real_byz: int
     b_hat: int
+    attack: str | None = None
     rag: bool = False
 
     # Data params

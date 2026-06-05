@@ -280,6 +280,7 @@ def _build_worker_config(cfg: BanditDLConfig, device: str) -> WorkerConfig:
         nb_byz=cfg.adversary.byzcount,
         nb_real_byz=cfg.adversary.byzcount,
         b_hat=cfg.adversary.byzantine_budget if cfg.adversary.byzantine_budget is not None else cfg.adversary.byzcount,
+        attack=cfg.adversary.attack,
         rag=cfg.aggregator.rag or cfg.topology.sampling is not None,
         numb_labels=cfg.dataset.numb_labels,
         labelflipping=cfg.adversary.attack == "LF",
