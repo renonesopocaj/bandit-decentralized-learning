@@ -83,12 +83,11 @@ def _mark_first_nonfinite(ax, x: np.ndarray, y: np.ndarray) -> None:
 
 
 class StandardPlotter:
-    def __init__(self, run_dir: Path, output_dir: Path, run_label: str | None = None):
-        self.run_dir = Path(run_dir)
+    def __init__(self, run_dirs: list[Path] | Path, output_dir: Path, labels: list[str] | None = None):
+        self.run_dirs = [run_dirs] if isinstance(run_dirs, Path) else run_dirs
         self.output_dir = Path(output_dir)
-        self.run_label = run_label or ""
-        self.loader = MetricLoader(self.run_dir)
-
+        self.labels = labels or [d.name for d in self.run_dirs]
+        self.loaders = [MetricLoader(d) for d in self.run_dirs]
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def plot(self, name: str, panels: Sequence[Panel]) -> Path:
@@ -105,7 +104,7 @@ class StandardPlotter:
 
         for idx, (ax, panel) in enumerate(zip(axes, panels, strict=True)):
             self._draw_panel(ax, panel)
-            ax.set_title(panel.title, pad=18 if idx == 0 else 8)
+            ax.set_title(panel.title, pad=8)
             ax.set_ylabel(panel.ylabel)
             if panel.ylim is not None:
                 ax.set_ylim(*panel.ylim)
@@ -113,73 +112,49 @@ class StandardPlotter:
             ax.set_yscale(panel.yscale)
             if idx == len(panels) - 1:
                 ax.set_xlabel(panel.xlabel)
-            if idx == 0:
-                caption = _extract_run_hparams(self.run_label)
-                if caption:
-                    ax.text(
-                        0.5,
-                        1.01,
-                        caption,
-                        transform=ax.transAxes,
-                        ha="center",
-                        va="bottom",
-                        fontsize=9,
-                    )
-            ax.grid(True, alpha=0.25)
-            ax.legend(
-                loc="best", ncols=min(4, len(panel.series)), frameon=False, fontsize=8
-            )
 
-        if any(
-            series.aggregate is not None for panel in panels for series in panel.series
-        ):
-            fig.text(
-                0.5,
-                0.01,
-                "Node-wise metrics are aggregated each round across nodes.",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
-            rect = (0.0, 0.06, 1.0, 0.97)
-        else:
-            rect = (0.0, 0.03, 1.0, 0.97)
+            ax.grid(True, alpha=0.25)
+            ax.legend(loc="best", fontsize=8, frameon=False)
 
         output = self.output_dir / name
-        fig.tight_layout(rect=rect)
+        fig.tight_layout()
         fig.savefig(output, dpi=160, bbox_inches="tight")
         plt.close(fig)
         return output
 
     def _draw_panel(self, ax, panel: Panel) -> None:
         for series in panel.series:
-            data = self.loader.load(
-                series.metric, interpolate_eval=series.interpolate_eval
-            )
-            values = data.values
-            if series.transform is not None:
-                values = series.transform(values)
-            y = self._aggregate(values, series)
-            x = data.x.astype(float) + panel.x_offset
-            if panel.xscale == "log" or panel.yscale == "log":
-                y = np.asarray(y, dtype=float)
-                x = np.asarray(x, dtype=float)
-                y = np.where(y > 0, y, np.nan)
-                x = np.where(x > 0, x, np.nan)
-            color = series.color or NODE_CURVE_COLORS.get(series.label)
-            linestyle = NODE_LINESTYLE.get(series.label, series.linestyle)
-            marker = NODE_MARKERS.get(series.label, "o" if series.marker else None)
-            linewidth = NODE_LINEWIDTH.get(series.label, 1.7)
-            ax.plot(
-                x,
-                y,
-                marker=marker,
-                linewidth=linewidth,
-                color=color,
-                linestyle=linestyle,
-                label=series.label,
-            )
-            _mark_first_nonfinite(ax, x, y)
+            for loader_idx, loader in enumerate(self.loaders):
+                try:
+                    data = loader.load(series.metric, interpolate_eval=series.interpolate_eval)
+                except FileNotFoundError:
+                    continue
+
+                values = data.values
+                if series.transform is not None:
+                    values = series.transform(values)
+
+                y = self._aggregate(values, series)
+                x = data.x.astype(float) + panel.x_offset
+
+                label = series.label
+                if len(self.loaders) > 1:
+                    label = f"{self.labels[loader_idx]} - {label}"
+
+                color = series.color or NODE_CURVE_COLORS.get(series.label)
+                # If we have multiple loaders, we should probably vary colors/styles
+                if len(self.loaders) > 1:
+                    color = None # Let matplotlib cycle
+
+                ax.plot(
+                    x, y,
+                    marker=NODE_MARKERS.get(series.label, "o" if series.marker else None),
+                    linewidth=NODE_LINEWIDTH.get(series.label, 1.7),
+                    color=color,
+                    linestyle=NODE_LINESTYLE.get(series.label, series.linestyle),
+                    label=label,
+                )
+                _mark_first_nonfinite(ax, x, y)
 
     @staticmethod
     def _aggregate(values: np.ndarray, series: Series) -> np.ndarray:
@@ -252,8 +227,9 @@ def _gradient_norm_loglog_panel() -> Panel:
     )
 
 
-def plot_all(run_dir: Path, plots_dir: Path, run_label: str) -> None:
-    plotter = StandardPlotter(run_dir, plots_dir, run_label)
+def plot_all(run_dir: Path, plots_dir: Path, run_label: str | None = None) -> None:
+    labels = [run_label] if run_label else None
+    plotter = StandardPlotter(run_dir, plots_dir, labels=labels)
 
     plotter.plot(
         "val_accuracy.png",

@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import re
 import string
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import optuna
 from omegaconf import OmegaConf
 
+from banditdl.utils.experiment_table import ExperimentTable, SweepRow
 from banditdl.utils.metrics import MetricLoader, scalar_reduce_seed_outer
 
 DEFAULT_PLOT_METRICS: tuple[str, ...] = (
@@ -252,45 +252,6 @@ class SweepAxis:
     is_conditional: bool
 
 
-@dataclass
-class SweepRow:
-    params: dict[str, Any]
-    metrics: dict[str, float] = field(default_factory=dict)
-
-
-class SweepTable:
-    def __init__(self, rows):
-        self.rows = rows
-
-    def filtered_rows(self, axis_paths):
-        paths_set = set(axis_paths)
-        kept = []
-        for row in self.rows:
-            trial_cfg = OmegaConf.create({})
-            for key, value in row.params.items():
-                OmegaConf.update(trial_cfg, key, value, merge=False)
-            ok = True
-            for path in paths_set:
-                spec = self._spec_for_path(path)
-                if spec is None:
-                    continue
-                when_clause = _when_clause(spec)
-                if when_clause is not None and not _conditions_met(trial_cfg, when_clause):
-                    ok = False
-                    break
-            if ok:
-                kept.append(row)
-        return kept
-
-    def attach_spec(self, search_space):
-        self._search_space = search_space
-
-    def _spec_for_path(self, path):
-        if not hasattr(self, "_search_space"):
-            return None
-        return self._search_space.get(path)
-
-
 def trial_params_for_table(trial):
     if trial.params:
         return dict(trial.params)
@@ -310,7 +271,7 @@ def trial_result_dir(trials_root: Path, trial, trial_params, axis_meta) -> Path:
     return trials_root / folder / "results"
 
 
-def sweep_table_from_study(trials_root, study, search_space, metric_names, directions):
+def sweep_table_from_study(trials_root, study, search_space, metric_names, directions) -> ExperimentTable:
     axes, axis_meta = build_axis_metadata(search_space)
     rows = []
     for trial in study.trials:
@@ -330,29 +291,10 @@ def sweep_table_from_study(trials_root, study, search_space, metric_names, direc
             for direction in directions:
                 metrics_flat[column_key_for(metric, direction)] = scalar_for_direction(metric, raw, direction)
         rows.append(SweepRow(params=trial_params, metrics=metrics_flat))
-    table = SweepTable(rows)
-    table.attach_spec(search_space)
+    table = ExperimentTable(rows)
     table.axes_meta = [_axis_values_from_rows(axis, rows) for axis in axes]
     table.axis_labels = {ax.path: ax.display_name for ax in table.axes_meta}
     return table
-
-
-class BaseSweepPlotter(ABC):
-    def __init__(self, table, axes, output_dir):
-        self.table = table
-        self.axes = axes
-        self.output_dir = output_dir
-
-    def plot(self, metric_names, direction):
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        for metric in metric_names:
-            self._plot_metric_column(metric, direction, column_key_for(metric, direction))
-
-    @abstractmethod
-    def _plot_metric_column(self, metric, direction, column_key): ...
-
-    def auto_subfolder_name(self, parts):
-        return "__".join(f"{_sanitize_token(label)}={_sanitize_token(value)}" for label, value in parts)
 
 
 def optuna_storage_url(output_root: Path) -> str:
@@ -408,35 +350,25 @@ def plot_sweep(plot_cfg, trials_root, study, search_space, output_dir):
     directions = normalize_directions(plot_cfg.get("directions"))
     all_metrics = metrics_for_plot(plot_cfg)
     table = sweep_table_from_study(trials_root, study, search_space, all_metrics, directions)
-    axes = table.axes_meta
 
-    from banditdl.utils.plot_sweep_heatmap import ExplicitHeatmapPlotter
-    from banditdl.utils.plot_sweep_perparam import PerParamPlotter
+    from banditdl.utils.sweep_plotting import SweepPlotter
+    plotter = SweepPlotter(table, output_dir)
 
     for direction in directions:
-        heatmap_specs = list(plot_cfg.get("heatmaps") or [])
-        if heatmap_specs:
-            plotter = ExplicitHeatmapPlotter(table, axes, output_dir / "heatmap" / f"direction={direction}")
-            for spec in heatmap_specs:
-                plotter.plot_spec(spec, metrics_for_plot(plot_cfg, spec.get("exclude_metrics")), direction)
-
+        # Per parameter plots
         per_param_cfg = plot_cfg.get("per_parameter") or {}
         if bool(per_param_cfg.get("enabled", False)):
             metrics = metrics_for_plot(plot_cfg, per_param_cfg.get("exclude_metrics"))
-            plotter = PerParamPlotter(table, axes, output_dir / "per_parameter" / f"direction={direction}")
-            plotter.plot(metrics, direction)
+            for metric in metrics:
+                plotter.plot_per_parameter(metric, direction)
 
-
-def make_sweep_plotter(mode, table, axes, output_dir):
-    from banditdl.utils.plot_sweep_alltogether import AllTogetherPlotter
-    from banditdl.utils.plot_sweep_heatmap import HeatmapPlotter
-    from banditdl.utils.plot_sweep_perparam import PerParamPlotter
-
-    normalized = str(mode).lower()
-    if normalized == "per_parameter":
-        return PerParamPlotter(table, axes, output_dir)
-    if normalized == "all_together":
-        return AllTogetherPlotter(table, axes, output_dir)
-    if normalized == "heatmap":
-        return HeatmapPlotter(table, axes, output_dir)
-    raise ValueError(f"Unsupported plot_mode: {mode}")
+        # Heatmap plots
+        heatmap_specs = list(plot_cfg.get("heatmaps") or [])
+        for spec in heatmap_specs:
+            metrics = metrics_for_plot(plot_cfg, spec.get("exclude_metrics"))
+            x_path = spec.get("x")
+            y_path = spec.get("y")
+            fixed = spec.get("fixed") or {}
+            if x_path and y_path:
+                for metric in metrics:
+                    plotter.plot_heatmap(metric, direction, x_path, y_path, fixed)
