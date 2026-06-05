@@ -29,11 +29,11 @@ class ByzantineWorker(BaseWorker):
             config.device,
         )
         self.byzantine_attack = ByzantineAttack(
-            config.method if config.method else "SF", # Default attack if not specified
+            config.attack if config.attack else "SF",
             config.nb_real_byz,
             model_size,
             config.device,
-            config.mimic_learning_phase if hasattr(config, 'mimic_learning_phase') else None,
+            config.mimic_learning_phase,
             config.gradient_clip,
             robust_aggregator,
         )

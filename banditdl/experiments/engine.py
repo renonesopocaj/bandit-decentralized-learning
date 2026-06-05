@@ -317,7 +317,7 @@ def _init_workers(cfg: BanditDLConfig, train_loader_dict, local_test_loader_dict
                 horizon=cfg.effective_rounds + 1,
                 seed=cfg.seed + worker_id,
             )
-            neighbor_sampler = make_neighbor_sampler(cfg.topology.neighbor_sampler, context=sampler_context, params=sampler_params)
+            neighbor_sampler = make_neighbor_sampler(cfg.resolved_sampler_name, context=sampler_context, params=sampler_params)
             reward_strategy = make_reward_strategy(cfg.topology.bandit_reward)
 
             config = replace(base_config, neighbor_sampler=neighbor_sampler, reward_strategy=reward_strategy)
@@ -427,8 +427,12 @@ def _run_experiment(cfg: BanditDLConfig, result_dir: pathlib.Path, seed: int, de
 
     workers = _init_workers(cfg, train_loader_dict, local_test_loader_dict, device, comm_graph=comm_graph, dissensus=(cfg.adversary.attack == "dissensus"))
     base_worker_config = _build_worker_config(cfg, device)
+    # Correctly inject graph for fixed mode workers
+    if mode == "fixed":
+        base_worker_config = replace(base_worker_config, comm_graph=comm_graph)
 
     byz_workers = [ByzantineWorker(i, workers[0].model_size, base_worker_config) for i in range(cfg.nb_honests, cfg.topology.nodes)]
+
     byz_workers_by_id = {byz.worker_id: byz for byz in byz_workers}
     dec_byz_workers = {i: DecByzantineWorker(i, cfg.nb_honests, base_worker_config) for i in range(cfg.nb_honests, cfg.topology.nodes)} if mode == "fixed" else {}
 

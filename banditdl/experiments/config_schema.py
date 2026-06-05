@@ -94,6 +94,12 @@ class BanditDLConfig:
 
     # Internal helpers computed at runtime
     @property
+    def resolved_sampler_name(self) -> str:
+        if self.sampler and "name" in self.sampler:
+            return str(self.sampler["name"])
+        return self.topology.neighbor_sampler
+
+    @property
     def nb_honests(self) -> int:
         return self.topology.nodes - self.adversary.byzcount
 
