@@ -7,11 +7,13 @@ Scripts:
 | `slurm/setup.sh` | **Login node** | One-time: install `uv`, sync deps, optionally pre-download FEMNIST. |
 | `slurm/sbatch_banditdl_gpu.sh` | **Login node** (via `sbatch`) | Submits one GPU training run (e.g. Izar). Takes Hydra overrides as args. |
 | `slurm/sbatch_banditdl_cpu.sh` | **Login node** (via `sbatch`) | Submits one CPU-only training run (e.g. Jed). Takes Hydra overrides as args. |
+| `slurm/sbatch_banditdl_optuna_gpu.sh` | **Login node** (via `sbatch`) | Submits one GPU Optuna sweep. Takes sweep Hydra overrides as args. |
 
-The two `sbatch_banditdl_*` scripts are identical except for the partition/GPU
-directives and the auto-injected `device=` default (`cuda` for GPU, `cpu` for
-CPU). The examples below use the GPU script; swap in `sbatch_banditdl_cpu.sh`
-to run the same command on a CPU partition.
+The single-run `sbatch_banditdl_gpu.sh` and `sbatch_banditdl_cpu.sh` scripts are
+identical except for the partition/GPU directives and the auto-injected
+`device=` default (`cuda` for GPU, `cpu` for CPU). The examples below use the
+GPU script; swap in `sbatch_banditdl_cpu.sh` to run the same command on a CPU
+partition.
 
 ## 1. One-time bootstrap (login node)
 
@@ -88,12 +90,13 @@ Hydra's `-m` flag enumerates the Cartesian product **sequentially** inside one j
 
 **Pattern C — Optuna sweep (dedicated sweep entry point):**
 
-The `slurm/submit_sweep_gpu.sh` / `slurm/submit_sweep_cpu.sh` helpers wrap the
-Optuna entry point for larger searches:
-
 ```bash
-sbatch --time=24:00:00 slurm/submit_sweep_gpu.sh optuna=sweep
+sbatch --time=24:00:00 slurm/sbatch_banditdl_optuna_gpu.sh optuna=sweep
 ```
+
+Use `slurm/submit_sweep_gpu.sh` only for its hard-coded shell sweeps
+(`cifar_dirichlet`, `femnist_pool_dirichlet`, etc.); it is not the Optuna entry
+point.
 
 ## 4. Output
 

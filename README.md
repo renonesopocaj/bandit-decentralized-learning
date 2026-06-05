@@ -72,7 +72,9 @@ uv run python -m banditdl.experiments.sweep
 Defaults (`conf/sweep.yaml`) compose `conf/config.yaml` plus `conf/optuna/sanitysweep.yaml`.
 
 Behavior:
-- Enumerates every valid Cartesian combination of **categorical** `optuna.search_space` entries (respecting optional `when:` guards).
+- Exhaustively enumerates valid Cartesian combinations when all `optuna.search_space` entries are categorical.
+- Uses Optuna sampling and `optuna.n_trials` when the search space contains continuous `float` / `int` entries.
+- Respects optional `when:` guards for conditional parameters such as sampler-specific hyperparameters.
 - Runs one Optuna trial per non-seed configuration and repeats that configuration `num_seeds` times.
 - Writes seed-averaged trial artifacts under `<hydra_run>/trials/<param_tokens>/results/` and raw seed artifacts under that directory's `seeds/` subfolder.
 - Tracks mean validation accuracy across seeds, selects the best trial, then re-runs all of its seeds with test evaluation under `<hydra_run>/best_trial_test_eval/results`.
