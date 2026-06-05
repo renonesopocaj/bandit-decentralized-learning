@@ -4,13 +4,12 @@ import copy
 import os
 import pathlib
 import random
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
 import torch
 
-from banditdl.utils.math_utils import consensus_drift, neighbor_disagreement
-from banditdl.utils.results import make_result_file, store_result
 from banditdl.core.sampling import (
     SamplerContext,
     make_neighbor_sampler,
@@ -19,9 +18,12 @@ from banditdl.core.sampling import (
 from banditdl.core.topology.fxgraph import generate_connected_graph
 from banditdl.core.topology.graph import CommunicationNetwork
 from banditdl.core.worker.byzantine import ByzantineWorker, DecByzantineWorker
+from banditdl.core.worker.config import WorkerConfig
 from banditdl.core.worker.dynamic import DynamicWorker
 from banditdl.core.worker.fixed import FixedGraphWorker
 from banditdl.data import dataset
+from banditdl.utils.math_utils import consensus_drift, neighbor_disagreement
+from banditdl.utils.results import make_result_file, store_result
 
 
 def _setup_seed(seed: int) -> None:
@@ -40,9 +42,7 @@ def _progress_interval(rounds: int) -> int:
 
 def _should_log_step(current_step: int, rounds: int) -> bool:
     return (
-        current_step == 0
-        or current_step == rounds
-        or current_step % _progress_interval(rounds) == 0
+        current_step in (0, rounds) or current_step % _progress_interval(rounds) == 0
     )
 
 
@@ -139,6 +139,128 @@ def _record_final_evaluation_if_needed(
     )
 
 
+class ResultTracker:
+    """Consolidates metrics tracking, evaluation, and saving results."""
+
+    def __init__(self, args, result_dir: pathlib.Path, test_loader=None):
+        self.args = args
+        self.result_dir = result_dir
+        self.test_loader = test_loader
+        self.result_dir.mkdir(parents=True, exist_ok=True)
+
+        self.fd_validation = (result_dir / "validation").open("w")
+        self.fd_validation_worst = (result_dir / "validation_worst").open("w")
+        self.fd_validation_loss = (result_dir / "validation_loss").open("w")
+        self.fd_train_loss = (result_dir / "train_loss").open("w")
+
+        make_result_file(self.fd_validation, ["Step number", "Cross-accuracy"])
+        make_result_file(self.fd_validation_worst, ["Step number", "Cross-accuracy"])
+        make_result_file(self.fd_validation_loss, ["Step number", "Cross-loss"])
+        make_result_file(self.fd_train_loss, ["Step number", "Cross-loss"])
+
+        self.validation_steps = []
+        self.validation_accuracies = []
+        self.validation_losses = []
+        self.train_losses = []
+        self.neighbor_disagreement_history = []
+        self.consensus_drift_history = []
+        self.gradient_norm_history = []
+
+    def evaluate_step(self, current_step, workers, mode):
+        mean_acc = None
+        mean_val_loss = None
+        mean_train_loss = None
+
+        if self.args.evaluation_delta > 0 and current_step % self.args.evaluation_delta == 0:
+            (
+                mean_acc,
+                mean_val_loss,
+                mean_train_loss,
+            ) = _record_evaluation(
+                workers,
+                self.fd_validation,
+                self.fd_validation_loss,
+                self.fd_train_loss,
+                current_step,
+                self.validation_steps,
+                self.validation_accuracies,
+                self.validation_losses,
+                self.train_losses,
+            )
+
+        if _should_log_step(current_step, self.args.rounds):
+            _log_progress(
+                mode,
+                current_step,
+                self.args,
+                mean_acc,
+                mean_val_loss,
+                mean_train_loss,
+            )
+        return mean_acc, mean_val_loss, mean_train_loss
+
+    def record_gradient_norms(self, workers):
+        self.gradient_norm_history.append(
+            np.array([w.last_gradient_norm for w in workers], dtype=float)
+        )
+
+    def record_drift(self, disagreement, consensus):
+        self.neighbor_disagreement_history.append(disagreement.cpu().numpy())
+        self.consensus_drift_history.append(consensus.cpu().numpy())
+
+    def finalize(self, workers, mode):
+        final_accuracy, final_val_loss, final_train_loss = _record_final_evaluation_if_needed(
+            self.args,
+            workers,
+            self.fd_validation,
+            self.fd_validation_loss,
+            self.fd_train_loss,
+            self.validation_steps,
+            self.validation_accuracies,
+            self.validation_losses,
+            self.train_losses,
+        )
+        if _should_log_step(self.args.rounds, self.args.rounds):
+            _log_progress(
+                mode,
+                self.args.rounds,
+                self.args,
+                final_accuracy,
+                final_val_loss,
+                final_train_loss,
+            )
+
+        if self.validation_accuracies:
+            worst_idx = min(range(len(workers)), key=lambda i: self.validation_accuracies[-1][i])
+            for step, accs in zip(self.validation_steps, self.validation_accuracies, strict=True):
+                store_result(self.fd_validation_worst, step, accs[worst_idx])
+
+        if self.args.evaluate_test and self.test_loader:
+            fd_test = (self.result_dir / "test").open("w")
+            make_result_file(fd_test, ["Step number", "Cross-accuracy"])
+            test_accuracies = [w.compute_accuracy_on_loader(self.test_loader) for w in workers]
+            store_result(fd_test, self.args.rounds, sum(test_accuracies) / len(test_accuracies))
+            fd_test.close()
+
+        self.fd_validation.close()
+        self.fd_validation_worst.close()
+        self.fd_validation_loss.close()
+        self.fd_train_loss.close()
+
+        np.save(os.path.join(self.result_dir, "validation_accuracies.npy"), np.array(self.validation_accuracies))
+        np.save(os.path.join(self.result_dir, "validation_losses.npy"), np.array(self.validation_losses))
+        np.save(os.path.join(self.result_dir, "train_losses.npy"), np.array(self.train_losses))
+        np.save(os.path.join(self.result_dir, "neighbor_disagreement.npy"), np.array(self.neighbor_disagreement_history))
+        np.save(os.path.join(self.result_dir, "consensus_drift.npy"), np.array(self.consensus_drift_history))
+        np.save(os.path.join(self.result_dir, "gradient_norms.npy"), np.array(self.gradient_norm_history))
+
+        with torch.no_grad():
+            final_weights = torch.stack([w.pull(None) for w in workers])
+            pairwise_distance_final = torch.cdist(final_weights, final_weights).cpu().numpy()
+        np.save(os.path.join(self.result_dir, "pairwise_model_distance_final.npy"), pairwise_distance_final)
+        _log_done(mode)
+
+
 def _make_args(
     params: dict, result_dir: pathlib.Path, seed: int, device: str
 ) -> SimpleNamespace:
@@ -195,59 +317,80 @@ def _make_args(
     return SimpleNamespace(**normalized)
 
 
-def _init_workers_dynamic(args, train_loader_dict, local_test_loader_dict):
+def _build_worker_config(args) -> WorkerConfig:
+    """Map the args namespace/dict to a structured WorkerConfig."""
+    # Handle both SimpleNamespace and dict for transition
+    def get_val(key, default=None):
+        if isinstance(args, dict):
+            return args.get(key, default)
+        return getattr(args, key, default)
+
+    return WorkerConfig(
+        model=get_val("model"),
+        learning_rate=get_val("learning_rate"),
+        learning_rate_decay=get_val("learning_rate_decay"),
+        learning_rate_decay_delta=get_val("learning_rate_decay_delta"),
+        weight_decay=get_val("weight_decay"),
+        loss=get_val("loss"),
+        momentum=get_val("momentum_worker"),
+        device=get_val("device"),
+        nb_local_steps=get_val("nb_local_steps"),
+        nb_workers=get_val("nb_workers"),
+        nb_byz=get_val("nb_decl_byz"),
+        nb_real_byz=get_val("nb_real_byz"),
+        b_hat=get_val("b_hat"),
+        rag=get_val("rag"),
+        numb_labels=get_val("numb_labels"),
+        labelflipping=get_val("attack") == "LF",
+        gradient_clip=get_val("gradient_clip"),
+        server_clip=get_val("server_clip"),
+        bucket_size=get_val("bucket_size"),
+        aggregator=get_val("aggregator"),
+        pre_aggregator=get_val("pre_aggregator"),
+        nb_neighbors=get_val("nb_neighbors"),
+        sampling_ratio=get_val("sampling_ratio"),
+        mimic_learning_phase=get_val("mimic_learning_phase"),
+        method=get_val("method"),
+        epsilon=get_val("epsilon", 1.0),
+    )
+
+
+def _init_workers(args, train_loader_dict, local_test_loader_dict, comm_graph=None, dissensus=False):
     workers = []
-    for worker_id in range(args.nb_honests):
-        sampler_params = dict(args.sampler_params or {})
-        if args.neighbor_sampler in {"bandit", "epsilon_greedy"}:
-            sampler_params.setdefault("epsilon", args.bandit_epsilon)
-            sampler_params.setdefault("initial_value", args.bandit_initial_value)
-        sampler_context = SamplerContext(
-            worker_id=worker_id,
-            nodes=args.nb_workers,
-            k=args.nb_neighbors,
-            horizon=args.rounds + 1,
-            seed=args.seed + worker_id,
-        )
-        neighbor_sampler = make_neighbor_sampler(
-            args.neighbor_sampler,
-            context=sampler_context,
-            params=sampler_params,
-        )
-        reward_strategy = make_reward_strategy(args.sampler_reward)
-        w = DynamicWorker(
-            worker_id,
-            train_loader_dict[worker_id],
-            local_test_loader_dict[worker_id],
-            args.nb_workers,
-            args.nb_decl_byz,
-            args.nb_real_byz,
-            args.aggregator,
-            args.pre_aggregator,
-            args.server_clip,
-            args.bucket_size,
-            args.model,
-            args.learning_rate,
-            args.learning_rate_decay,
-            args.learning_rate_decay_delta,
-            args.weight_decay,
-            args.loss,
-            args.momentum_worker,
-            args.device,
-            args.attack == "LF",
-            args.gradient_clip,
-            args.numb_labels,
-            args.nb_neighbors,
-            getattr(args, "sampling_ratio", None),
-            args.rag,
-            args.b_hat,
-            args.nb_local_steps,
-            neighbor_sampler=neighbor_sampler,
-            reward_strategy=reward_strategy,
-        )
-        if worker_id > 0:
-            w.model.load_state_dict(workers[0].model.state_dict())
-        workers.append(w)
+    base_config = _build_worker_config(args)
+
+    if comm_graph is not None:
+        # Fixed graph mode
+        for worker_id in range(args.nb_honests):
+            config = replace(base_config, comm_graph=comm_graph, dissensus=dissensus)
+            w = FixedGraphWorker(worker_id, train_loader_dict[worker_id], local_test_loader_dict[worker_id], config)
+            if worker_id > 0:
+                w.model.load_state_dict(workers[0].model.state_dict())
+            workers.append(w)
+    else:
+        # Dynamic sampling mode
+        for worker_id in range(args.nb_honests):
+            sampler_params = dict(args.sampler_params or {})
+            if args.neighbor_sampler in {"bandit", "epsilon_greedy"}:
+                sampler_params.setdefault("epsilon", args.bandit_epsilon)
+                sampler_params.setdefault("initial_value", args.bandit_initial_value)
+
+            sampler_context = SamplerContext(
+                worker_id=worker_id,
+                nodes=args.nb_workers,
+                k=args.nb_neighbors,
+                horizon=args.rounds + 1,
+                seed=args.seed + worker_id,
+            )
+            neighbor_sampler = make_neighbor_sampler(args.neighbor_sampler, context=sampler_context, params=sampler_params)
+            reward_strategy = make_reward_strategy(args.sampler_reward)
+
+            config = replace(base_config, neighbor_sampler=neighbor_sampler, reward_strategy=reward_strategy)
+            w = DynamicWorker(worker_id, train_loader_dict[worker_id], local_test_loader_dict[worker_id], config)
+            if worker_id > 0:
+                w.model.load_state_dict(workers[0].model.state_dict())
+            workers.append(w)
+
     return workers
 
 
@@ -314,10 +457,10 @@ def _sampler_probability_stats(worker) -> tuple[float, float, float]:
     return kl_to_uniform, float(probabilities.min()), float(probabilities.max())
 
 
-def run_dynamic(params: dict, result_dir: pathlib.Path, seed: int, device: str) -> None:
+def _run_experiment(params: dict, result_dir: pathlib.Path, seed: int, device: str, mode: str) -> None:
     args = _make_args(params, result_dir, seed, device)
     _setup_seed(args.seed)
-    _log_start("dynamic", args, result_dir)
+    _log_start(mode, args, result_dir)
 
     train_loader_dict, local_test_loader_dict, test_loader = dataset.make_train_validation_test_datasets(
         args.dataset,
@@ -344,551 +487,131 @@ def run_dynamic(params: dict, result_dir: pathlib.Path, seed: int, device: str) 
         nb_writers_limit=args.nb_writers_limit,
     )
 
-    result_dir.mkdir(parents=True, exist_ok=True)
-    workers = _init_workers_dynamic(args, train_loader_dict, local_test_loader_dict)
+    comm_graph = None
+    adjacency_honest = None
+    if mode == "fixed":
+        nb_edges = args.nb_workers * args.nb_neighbors // 2
+        g = generate_connected_graph(args.nb_workers, nb_edges, seed=args.seed)
+        comm_graph = CommunicationNetwork(g, weights_method="metropolis", device=args.device if args.device != "auto" else "cpu")
+        adjacency_honest = torch.as_tensor(np.asarray(comm_graph.adjacency_matrix[: args.nb_honests, : args.nb_honests]), dtype=torch.float32, device=args.device)
 
-    byz_workers = [
-        ByzantineWorker(
-            worker_id=i,
-            nb_workers=args.nb_workers,
-            nb_decl_byz=args.nb_decl_byz,
-            nb_real_byz=args.nb_real_byz,
-            attack=args.attack,
-            aggregator=args.aggregator,
-            second_aggregator=args.pre_aggregator,
-            server_clip=args.server_clip,
-            bucket_size=args.bucket_size,
-            model_size=workers[0].model_size,
-            mimic_learning_phase=args.mimic_learning_phase,
-            gradient_clip=args.gradient_clip,
-            device=args.device,
-        )
-        for i in range(args.nb_honests, args.nb_workers)
-    ]
+    workers = _init_workers(args, train_loader_dict, local_test_loader_dict, comm_graph=comm_graph, dissensus=(args.attack == "dissensus"))
+    base_config = _build_worker_config(args)
+
+    byz_workers = [ByzantineWorker(i, workers[0].model_size, base_config) for i in range(args.nb_honests, args.nb_workers)]
     byz_workers_by_id = {byz.worker_id: byz for byz in byz_workers}
+    dec_byz_workers = {i: DecByzantineWorker(i, args.nb_honests, base_config) for i in range(args.nb_honests, args.nb_workers)} if mode == "fixed" else {}
 
-    fd_validation = (result_dir / "validation").open("w")
-    fd_validation_worst = (result_dir / "validation_worst").open("w")
-    fd_validation_loss = (result_dir / "validation_loss").open("w")
-    fd_train_loss = (result_dir / "train_loss").open("w")
-    make_result_file(fd_validation, ["Step number", "Cross-accuracy"])
-    make_result_file(fd_validation_worst, ["Step number", "Cross-accuracy"])
-    make_result_file(fd_validation_loss, ["Step number", "Cross-loss"])
-    make_result_file(fd_train_loss, ["Step number", "Cross-loss"])
+    tracker = ResultTracker(args, result_dir, test_loader)
 
-    validation_steps: list[int] = []
-    validation_accuracies: list[list[float]] = []
-    validation_losses: list[list[float]] = []
-    train_losses: list[list[float]] = []
+    # Dynamic-specific tracking
     cumulative_arm_rewards = np.zeros((args.nb_honests, args.nb_workers))
     cumulative_algorithm_rewards = np.zeros(args.nb_honests)
-    algorithm_reward_history = []
-    oracle_reward_history = []
-    selected_neighbor_history = []
-    oracle_neighbor_history = []
-    neighbor_disagreement_history = []
-    consensus_drift_history = []
-    sampler_kl_history = []
-    sampler_min_probability_history = []
-    sampler_max_probability_history = []
-    selected_reward_min_history = []
-    selected_reward_max_history = []
-    gradient_norm_history = []
+    algorithm_reward_history, oracle_reward_history, selected_neighbor_history, oracle_neighbor_history = [], [], [], []
+    sampler_kl_history, sampler_min_prob_history, sampler_max_prob_history = [], [], []
+    reward_min_history, reward_max_history = [], []
 
     for current_step in range(args.rounds + 1):
-        mean_validation_accuracy = None
-        mean_validation_loss = None
-        mean_train_loss = None
-        if args.evaluation_delta > 0 and current_step % args.evaluation_delta == 0:
-            (
-                mean_validation_accuracy,
-                mean_validation_loss,
-                mean_train_loss,
-            ) = _record_evaluation(
-                workers,
-                fd_validation,
-                fd_validation_loss,
-                fd_train_loss,
-                current_step,
-                validation_steps,
-                validation_accuracies,
-                validation_losses,
-                train_losses,
-            )
-
-        if _should_log_step(current_step, args.rounds):
-            _log_progress(
-                "dynamic",
-                current_step,
-                args,
-                mean_validation_accuracy,
-                mean_validation_loss,
-                mean_train_loss,
-            )
+        tracker.evaluate_step(current_step, workers, mode)
 
         for w in workers:
             w.train()
-        gradient_norm_history.append(
-            np.array([w.last_gradient_norm for w in workers], dtype=float)
-        )
+        tracker.record_gradient_norms(workers)
         honest_weights = [w.pull(None) for w in workers]
 
-        selected_round = np.full(
-            (args.nb_honests, workers[0].nb_neighbors), -1, dtype=int
-        )
-        sampler_kl_round = np.zeros(args.nb_honests)
-        sampler_min_probability_round = np.zeros(args.nb_honests)
-        sampler_max_probability_round = np.zeros(args.nb_honests)
-        selected_reward_min_round = np.full(args.nb_honests, np.nan)
-        selected_reward_max_round = np.full(args.nb_honests, np.nan)
-        for w in workers:
-            (
-                sampler_kl_round[w.worker_id],
-                sampler_min_probability_round[w.worker_id],
-                sampler_max_probability_round[w.worker_id],
-            ) = _sampler_probability_stats(w)
-            neighbor_indices = w._sample_neighbors()
-            candidate_weights = _dynamic_candidate_weights(
-                w, honest_weights, byz_workers, current_step
-            )
-            selected_neighbor_ids = [
-                i for i in neighbor_indices if i in candidate_weights
-            ]
-            for neighbor_id in selected_neighbor_ids:
-                if neighbor_id >= args.nb_honests:
-                    weight = byz_workers_by_id[neighbor_id].pull(
-                        {"honest_weights": honest_weights, "step": current_step}
-                    )
-                    if weight is not None:
-                        candidate_weights[neighbor_id] = weight
-            candidate_ids = list(candidate_weights)
-            candidate_values = [candidate_weights[i] for i in candidate_ids]
-            candidate_rewards = w.reward_strategy.score(w.pull(None), candidate_values)
-            rewards_by_id = dict(zip(candidate_ids, candidate_rewards, strict=True))
-            cumulative_arm_rewards[w.worker_id, candidate_ids] += candidate_rewards
+        if mode == "dynamic":
+            selected_round = np.full((args.nb_honests, workers[0].nb_neighbors), -1, dtype=int)
+            kl_round, min_prob_round, max_prob_round = np.zeros(args.nb_honests), np.zeros(args.nb_honests), np.zeros(args.nb_honests)
+            reward_min_round, reward_max_round = np.full(args.nb_honests, np.nan), np.full(args.nb_honests, np.nan)
 
-            neighbor_weights = [candidate_weights[i] for i in selected_neighbor_ids]
-            byz_neighbor_ids = [
-                i for i in selected_neighbor_ids if i >= args.nb_honests
-            ]
-            selected_round[w.worker_id, : len(selected_neighbor_ids)] = (
-                selected_neighbor_ids
-            )
-            selected_rewards = [rewards_by_id[i] for i in selected_neighbor_ids]
-            if selected_rewards:
-                selected_reward_min_round[w.worker_id] = min(selected_rewards)
-                selected_reward_max_round[w.worker_id] = max(selected_rewards)
-                cumulative_algorithm_rewards[w.worker_id] += _mean_selected_reward(
-                    selected_rewards
-                )
-            w.num_selected_byz.append(len(byz_neighbor_ids))
-            w.observe_neighbors(selected_neighbor_ids, neighbor_weights)
-            w.aggregate(neighbor_weights)
+            for w in workers:
+                kl_round[w.worker_id], min_prob_round[w.worker_id], max_prob_round[w.worker_id] = _sampler_probability_stats(w)
+                neighbor_indices = w._sample_neighbors()
+                candidate_weights = _dynamic_candidate_weights(w, honest_weights, byz_workers, current_step)
+                selected_ids = [i for i in neighbor_indices if i in candidate_weights]
 
-        with torch.no_grad():
-            updated_weights = [w.pull(None) for w in workers]
-            _raise_if_nonfinite_weights(workers, current_step, "dynamic")
-            neighbor_matrix = selected_round.copy()
-            neighbor_matrix[neighbor_matrix >= args.nb_honests] = -1
-            disagreement = neighbor_disagreement(
-                updated_weights, neighbor_indices=neighbor_matrix.tolist()
-            )
-            consensus = consensus_drift(updated_weights)
-        neighbor_disagreement_history.append(disagreement.cpu().numpy())
-        consensus_drift_history.append(consensus.cpu().numpy())
-        sampler_kl_history.append(sampler_kl_round)
-        sampler_min_probability_history.append(sampler_min_probability_round)
-        sampler_max_probability_history.append(sampler_max_probability_round)
-        selected_reward_min_history.append(selected_reward_min_round)
-        selected_reward_max_history.append(selected_reward_max_round)
+                for nid in selected_ids:
+                    if nid >= args.nb_honests:
+                        weight = byz_workers_by_id[nid].pull({"honest_weights": honest_weights, "step": current_step})
+                        if weight is not None:
+                            candidate_weights[nid] = weight
 
-        oracle_neighbors = []
-        oracle_rewards_round = []
-        for w in workers:
-            oracle_ids, oracle_reward = _best_fixed_subset(
-                cumulative_arm_rewards[w.worker_id],
-                worker_id=w.worker_id,
-                k=w.nb_neighbors,
-            )
-            oracle_neighbors.append(oracle_ids)
-            oracle_rewards_round.append(oracle_reward)
+                candidate_ids = list(candidate_weights)
+                candidate_rewards = w.reward_strategy.score(w.pull(None), [candidate_weights[i] for i in candidate_ids])
+                rewards_by_id = dict(zip(candidate_ids, candidate_rewards, strict=True))
+                cumulative_arm_rewards[w.worker_id, candidate_ids] += candidate_rewards
 
-        algorithm_reward_history.append(cumulative_algorithm_rewards.copy())
-        oracle_reward_history.append(np.array(oracle_rewards_round))
-        selected_neighbor_history.append(selected_round)
-        oracle_neighbor_history.append(np.stack(oracle_neighbors))
+                neighbor_weights = [candidate_weights[i] for i in selected_ids]
+                selected_round[w.worker_id, :len(selected_ids)] = selected_ids
+                selected_rewards = [rewards_by_id[i] for i in selected_ids]
+                if selected_rewards:
+                    reward_min_round[w.worker_id], reward_max_round[w.worker_id] = min(selected_rewards), max(selected_rewards)
+                    cumulative_algorithm_rewards[w.worker_id] += _mean_selected_reward(selected_rewards)
 
-    final_accuracy, final_validation_loss, final_train_loss = (
-        _record_final_evaluation_if_needed(
-            args,
-            workers,
-            fd_validation,
-            fd_validation_loss,
-            fd_train_loss,
-            validation_steps,
-            validation_accuracies,
-            validation_losses,
-            train_losses,
-        )
-    )
-    if _should_log_step(args.rounds, args.rounds):
-        _log_progress(
-            "dynamic",
-            args.rounds,
-            args,
-            final_accuracy,
-            final_validation_loss,
-            final_train_loss,
-        )
+                w.num_selected_byz.append(len([i for i in selected_ids if i >= args.nb_honests]))
+                w.observe_neighbors(selected_ids, neighbor_weights)
+                w.aggregate(neighbor_weights)
 
-    if validation_accuracies:
-        worst_idx = min(range(len(workers)), key=lambda i: validation_accuracies[-1][i])
-        for step, accs in zip(validation_steps, validation_accuracies, strict=True):
-            store_result(fd_validation_worst, step, accs[worst_idx])
+            sampler_kl_history.append(kl_round)
+            sampler_min_prob_history.append(min_prob_round)
+            sampler_max_prob_history.append(max_prob_round)
+            reward_min_history.append(reward_min_round)
+            reward_max_history.append(reward_max_round)
 
-    if args.evaluate_test:
-        fd_test = (result_dir / "test").open("w")
-        make_result_file(fd_test, ["Step number", "Cross-accuracy"])
-        test_accuracies = [w.compute_accuracy_on_loader(test_loader) for w in workers]
-        store_result(fd_test, args.rounds, sum(test_accuracies) / len(test_accuracies))
-        fd_test.close()
+            oracle_neighbors_round, oracle_rewards_round = [], []
+            for w in workers:
+                oids, oreward = _best_fixed_subset(cumulative_arm_rewards[w.worker_id], worker_id=w.worker_id, k=w.nb_neighbors)
+                oracle_neighbors_round.append(oids)
+                oracle_rewards_round.append(oreward)
+            algorithm_reward_history.append(cumulative_algorithm_rewards.copy())
+            oracle_reward_history.append(np.array(oracle_rewards_round))
+            selected_neighbor_history.append(selected_round)
+            oracle_neighbor_history.append(np.stack(oracle_neighbors_round))
 
-    fd_validation.close()
-    fd_validation_worst.close()
-    fd_validation_loss.close()
-    fd_train_loss.close()
+            with torch.no_grad():
+                updated = [w.pull(None) for w in workers]
+                neighbor_matrix = selected_round.copy()
+                neighbor_matrix[neighbor_matrix >= args.nb_honests] = -1
+                tracker.record_drift(neighbor_disagreement(updated, neighbor_indices=neighbor_matrix.tolist()), consensus_drift(updated))
+        else:
+            # Fixed mode
+            for w in workers:
+                neighbors = [*list(w.comm_graph.neighbors(w.worker_id)), w.worker_id]
+                honest_nids = [i for i in neighbors if i < args.nb_honests]
+                byz_nids = [i for i in neighbors if i >= args.nb_honests]
+                w.num_selected_byz.append(len(byz_nids))
+                h_weights = [honest_weights[i] for i in honest_nids]
+                if args.attack == "dissensus":
+                    b_weights = [dec_byz_workers[i].pull({"target": w.worker_id, "honest_neighbors": honest_nids, "pivot_params": w.pull(None), "honest_local_params": h_weights}) for i in byz_nids]
+                else:
+                    b_weights = [byz_workers_by_id[i].pull({"honest_weights": honest_weights, "step": current_step}) for i in byz_nids]
+                w.aggregate(h_weights + b_weights)
 
-    algorithm_rewards = np.array(algorithm_reward_history)
-    oracle_rewards = np.array(oracle_reward_history)
-    regret = oracle_rewards - algorithm_rewards
+            with torch.no_grad():
+                updated = [w.pull(None) for w in workers]
+                tracker.record_drift(neighbor_disagreement(updated, adjacency=adjacency_honest), consensus_drift(updated))
 
-    np.save(os.path.join(result_dir, "validation_accuracies.npy"), np.array(validation_accuracies))
-    np.save(os.path.join(result_dir, "accuracies.npy"), np.array(validation_accuracies))
-    np.save(os.path.join(result_dir, "validation_losses.npy"), np.array(validation_losses))
-    np.save(os.path.join(result_dir, "train_losses.npy"), np.array(train_losses))
-    np.save(os.path.join(result_dir, "reward_algorithm.npy"), algorithm_rewards)
-    np.save(os.path.join(result_dir, "reward_oracle.npy"), oracle_rewards)
-    np.save(os.path.join(result_dir, "regret.npy"), regret)
-    np.save(
-        os.path.join(result_dir, "reward_selected_min.npy"),
-        np.array(selected_reward_min_history),
-    )
-    np.save(
-        os.path.join(result_dir, "reward_selected_max.npy"),
-        np.array(selected_reward_max_history),
-    )
-    np.save(
-        os.path.join(result_dir, "selected_neighbors.npy"),
-        np.array(selected_neighbor_history, dtype=int),
-    )
-    np.save(
-        os.path.join(result_dir, "oracle_neighbors.npy"),
-        np.array(oracle_neighbor_history, dtype=int),
-    )
-    np.save(
-        os.path.join(result_dir, "neighbor_disagreement.npy"),
-        np.array(neighbor_disagreement_history),
-    )
-    np.save(
-        os.path.join(result_dir, "consensus_drift.npy"),
-        np.array(consensus_drift_history),
-    )
-    np.save(
-        os.path.join(result_dir, "sampler_kl_to_uniform.npy"),
-        np.array(sampler_kl_history),
-    )
-    np.save(
-        os.path.join(result_dir, "sampler_min_probability.npy"),
-        np.array(sampler_min_probability_history),
-    )
-    np.save(
-        os.path.join(result_dir, "sampler_max_probability.npy"),
-        np.array(sampler_max_probability_history),
-    )
-    np.save(
-        os.path.join(result_dir, "gradient_norms.npy"),
-        np.array(gradient_norm_history),
-    )
+        _raise_if_nonfinite_weights(workers, current_step, mode)
 
-    sampler_probabilities_final = np.stack(
-        [_full_sampler_probability_vector(w, args.nb_workers) for w in workers]
-    )
-    np.save(
-        os.path.join(result_dir, "sampler_probabilities_final.npy"),
-        sampler_probabilities_final,
-    )
-    with torch.no_grad():
-        final_weights = torch.stack([w.pull(None) for w in workers])
-        pairwise_distance_final = torch.cdist(final_weights, final_weights).cpu().numpy()
-    np.save(
-        os.path.join(result_dir, "pairwise_model_distance_final.npy"),
-        pairwise_distance_final,
-    )
-    _log_done("dynamic")
+    tracker.finalize(workers, mode)
+    if mode == "dynamic":
+        np.save(result_dir / "reward_algorithm.npy", np.array(algorithm_reward_history))
+        np.save(result_dir / "reward_oracle.npy", np.array(oracle_reward_history))
+        np.save(result_dir / "regret.npy", np.array(oracle_reward_history) - np.array(algorithm_reward_history))
+        np.save(result_dir / "reward_selected_min.npy", np.array(reward_min_history))
+        np.save(result_dir / "reward_selected_max.npy", np.array(reward_max_history))
+        np.save(result_dir / "selected_neighbors.npy", np.array(selected_neighbor_history, dtype=int))
+        np.save(result_dir / "oracle_neighbors.npy", np.array(oracle_neighbor_history, dtype=int))
+        np.save(result_dir / "sampler_kl_to_uniform.npy", np.array(sampler_kl_history))
+        np.save(result_dir / "sampler_min_probability.npy", np.array(sampler_min_prob_history))
+        np.save(result_dir / "sampler_max_probability.npy", np.array(sampler_max_prob_history))
+        sampler_probs_final = np.stack([_full_sampler_probability_vector(w, args.nb_workers) for w in workers])
+        np.save(result_dir / "sampler_probabilities_final.npy", sampler_probs_final)
+
+
+def run_dynamic(params: dict, result_dir: pathlib.Path, seed: int, device: str) -> None:
+    _run_experiment(params, result_dir, seed, device, "dynamic")
 
 
 def run_fixed(params: dict, result_dir: pathlib.Path, seed: int, device: str) -> None:
-    args = _make_args(params, result_dir, seed, device)
-    _setup_seed(args.seed)
-    _log_start("fixed", args, result_dir)
-
-    train_loader_dict, local_test_loader_dict, test_loader = dataset.make_train_validation_test_datasets(
-        args.dataset,
-        heterogeneity=args.hetero,
-        numb_labels=args.numb_labels,
-        alpha_dirichlet=args.dirichlet_alpha,
-        distinct_datasets=args.distinct_data,
-        nb_datapoints=args.nb_datapoints,
-        honest_workers=args.nb_honests,
-        train_batch=args.batch_size,
-        test_batch=args.batch_size_test,
-        global_test_ratio=args.global_test_ratio,
-        local_test_ratio=args.local_test_ratio,
-        split_seed=args.eval_split_seed,
-        partition_method=args.partition_method,
-        partition_style=args.partition_style,
-        classes_per_worker=args.classes_per_worker,
-        nb_shards=args.nb_shards,
-        shards_per_worker=args.shards_per_worker,
-        nb_groups=args.nb_groups,
-        classes_per_group=args.classes_per_group,
-        group_overlap=args.group_overlap,
-        dataset_mode=args.dataset_mode,
-        nb_writers_limit=args.nb_writers_limit,
-    )
-
-    nb_edges = args.nb_workers * args.nb_neighbors // 2
-    g = generate_connected_graph(args.nb_workers, nb_edges, seed=args.seed)
-    comm_graph = CommunicationNetwork(
-        g,
-        weights_method="metropolis",
-        device=args.device if args.device != "auto" else "cpu",
-    )
-    dissensus = args.attack == "dissensus"
-    adjacency_honest = torch.as_tensor(
-        np.asarray(
-            comm_graph.adjacency_matrix[: args.nb_honests, : args.nb_honests]
-        ),
-        dtype=torch.float32,
-        device=args.device,
-    )
-
-    result_dir.mkdir(parents=True, exist_ok=True)
-    workers: list[FixedGraphWorker] = []
-    for worker_id in range(args.nb_honests):
-        w = FixedGraphWorker(
-            worker_id,
-            train_loader_dict[worker_id],
-            local_test_loader_dict[worker_id],
-            args.nb_workers,
-            args.nb_decl_byz,
-            args.nb_real_byz,
-            args.aggregator,
-            args.pre_aggregator,
-            args.server_clip,
-            args.bucket_size,
-            args.model,
-            args.learning_rate,
-            args.learning_rate_decay,
-            args.learning_rate_decay_delta,
-            args.weight_decay,
-            args.loss,
-            args.momentum_worker,
-            args.device,
-            args.attack == "LF",
-            args.gradient_clip,
-            args.numb_labels,
-            args.nb_neighbors,
-            args.rag,
-            args.b_hat,
-            args.nb_local_steps,
-            args.method,
-            comm_graph,
-            dissensus,
-        )
-        if worker_id > 0:
-            w.model.load_state_dict(workers[0].model.state_dict())
-        workers.append(w)
-
-    byz_workers = {
-        i: ByzantineWorker(
-            i,
-            args.nb_workers,
-            args.nb_decl_byz,
-            args.nb_real_byz,
-            args.attack,
-            args.aggregator,
-            args.pre_aggregator,
-            args.server_clip,
-            args.bucket_size,
-            workers[0].model_size,
-            args.mimic_learning_phase,
-            args.gradient_clip,
-            args.device,
-        )
-        for i in range(args.nb_honests, args.nb_workers)
-    }
-    dec_byz_workers = {
-        i: DecByzantineWorker(i, args.nb_honests, comm_graph, args.device)
-        for i in range(args.nb_honests, args.nb_workers)
-    }
-
-    fd_validation = (result_dir / "validation").open("w")
-    fd_validation_worst = (result_dir / "validation_worst").open("w")
-    fd_validation_loss = (result_dir / "validation_loss").open("w")
-    fd_train_loss = (result_dir / "train_loss").open("w")
-    make_result_file(fd_validation, ["Step number", "Cross-accuracy"])
-    make_result_file(fd_validation_worst, ["Step number", "Cross-accuracy"])
-    make_result_file(fd_validation_loss, ["Step number", "Cross-loss"])
-    make_result_file(fd_train_loss, ["Step number", "Cross-loss"])
-
-    validation_steps: list[int] = []
-    validation_accuracies: list[list[float]] = []
-    validation_losses: list[list[float]] = []
-    train_losses: list[list[float]] = []
-    neighbor_disagreement_history = []
-    consensus_drift_history = []
-    gradient_norm_history = []
-    for current_step in range(args.rounds + 1):
-        mean_validation_accuracy = None
-        mean_validation_loss = None
-        mean_train_loss = None
-        if args.evaluation_delta > 0 and current_step % args.evaluation_delta == 0:
-            (
-                mean_validation_accuracy,
-                mean_validation_loss,
-                mean_train_loss,
-            ) = _record_evaluation(
-                workers,
-                fd_validation,
-                fd_validation_loss,
-                fd_train_loss,
-                current_step,
-                validation_steps,
-                validation_accuracies,
-                validation_losses,
-                train_losses,
-            )
-
-        if _should_log_step(current_step, args.rounds):
-            _log_progress(
-                "fixed",
-                current_step,
-                args,
-                mean_validation_accuracy,
-                mean_validation_loss,
-                mean_train_loss,
-            )
-
-        for w in workers:
-            w.train()
-        gradient_norm_history.append(
-            np.array([w.last_gradient_norm for w in workers], dtype=float)
-        )
-        honest_weights = [w.pull(None) for w in workers]
-
-        for w in workers:
-            neighbors = list(w.comm_graph.neighbors(w.worker_id)) + [w.worker_id]
-            honest_neighbors = [i for i in neighbors if i < args.nb_honests]
-            byz_neighbors = [i for i in neighbors if i >= args.nb_honests]
-            w.num_selected_byz.append(len(byz_neighbors))
-            honest_neighbor_weights = [honest_weights[i] for i in honest_neighbors]
-            if dissensus:
-                byz_weights = [
-                    dec_byz_workers[i].pull(
-                        {
-                            "target": w.worker_id,
-                            "honest_neighbors": honest_neighbors,
-                            "pivot_params": w.pull(None),
-                            "honest_local_params": honest_neighbor_weights,
-                        }
-                    )
-                    for i in byz_neighbors
-                ]
-            else:
-                byz_weights = (
-                    [
-                        byz_workers[byz_neighbor].pull(
-                            {"honest_weights": honest_weights, "step": current_step}
-                        )
-                        for byz_neighbor in byz_neighbors
-                    ]
-                    if byz_neighbors
-                    else []
-                )
-            w.aggregate(honest_neighbor_weights + byz_weights)
-
-        with torch.no_grad():
-            updated_weights = [w.pull(None) for w in workers]
-            _raise_if_nonfinite_weights(workers, current_step, "fixed")
-            disagreement = neighbor_disagreement(
-                updated_weights, adjacency=adjacency_honest
-            )
-            consensus = consensus_drift(updated_weights)
-        neighbor_disagreement_history.append(disagreement.cpu().numpy())
-        consensus_drift_history.append(consensus.cpu().numpy())
-
-    final_accuracy, final_validation_loss, final_train_loss = (
-        _record_final_evaluation_if_needed(
-            args,
-            workers,
-            fd_validation,
-            fd_validation_loss,
-            fd_train_loss,
-            validation_steps,
-            validation_accuracies,
-            validation_losses,
-            train_losses,
-        )
-    )
-    if _should_log_step(args.rounds, args.rounds):
-        _log_progress(
-            "fixed",
-            args.rounds,
-            args,
-            final_accuracy,
-            final_validation_loss,
-            final_train_loss,
-        )
-
-    if validation_accuracies:
-        worst_idx = min(range(len(workers)), key=lambda i: validation_accuracies[-1][i])
-        for step, accs in zip(validation_steps, validation_accuracies, strict=True):
-            store_result(fd_validation_worst, step, accs[worst_idx])
-
-    if args.evaluate_test:
-        fd_test = (result_dir / "test").open("w")
-        make_result_file(fd_test, ["Step number", "Cross-accuracy"])
-        test_accuracies = [w.compute_accuracy_on_loader(test_loader) for w in workers]
-        store_result(fd_test, args.rounds, sum(test_accuracies) / len(test_accuracies))
-        fd_test.close()
-
-    fd_validation.close()
-    fd_validation_worst.close()
-    fd_validation_loss.close()
-    fd_train_loss.close()
-
-    np.save(os.path.join(result_dir, "validation_accuracies.npy"), np.array(validation_accuracies))
-    np.save(os.path.join(result_dir, "accuracies.npy"), np.array(validation_accuracies))
-    np.save(os.path.join(result_dir, "validation_losses.npy"), np.array(validation_losses))
-    np.save(os.path.join(result_dir, "train_losses.npy"), np.array(train_losses))
-    np.save(
-        os.path.join(result_dir, "neighbor_disagreement.npy"),
-        np.array(neighbor_disagreement_history),
-    )
-    np.save(
-        os.path.join(result_dir, "consensus_drift.npy"),
-        np.array(consensus_drift_history),
-    )
-    np.save(
-        os.path.join(result_dir, "gradient_norms.npy"),
-        np.array(gradient_norm_history),
-    )
-    with torch.no_grad():
-        final_weights = torch.stack([w.pull(None) for w in workers])
-        pairwise_distance_final = torch.cdist(final_weights, final_weights).cpu().numpy()
-    np.save(
-        os.path.join(result_dir, "pairwise_model_distance_final.npy"),
-        pairwise_distance_final,
-    )
-    _log_done("fixed")
+    _run_experiment(params, result_dir, seed, device, "fixed")

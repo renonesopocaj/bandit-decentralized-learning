@@ -6,6 +6,8 @@ from typing import Any
 import torch
 from omegaconf import DictConfig, OmegaConf
 
+from banditdl.core.worker.config import WorkerConfig
+
 
 @dataclass(frozen=True)
 class EngineRunConfig:
@@ -14,6 +16,42 @@ class EngineRunConfig:
     run_name: str
     nb_neighbors: int
     byzantine_budget: int
+
+    def to_worker_config(self, device: str) -> WorkerConfig:
+        """Convert engine parameters to a structured WorkerConfig."""
+        p = self.params
+        return WorkerConfig(
+            model=p["model"],
+            learning_rate=p.get("learning-rate", 0.1),
+            learning_rate_decay=p.get("learning-rate-decay", 0),
+            learning_rate_decay_delta=p.get("learning-rate-decay-delta", 0),
+            weight_decay=p.get("weight-decay", 0.0),
+            loss=p["loss"],
+            momentum=p.get("momentum-worker", 0.0),
+            device=device,
+            nb_local_steps=p.get("nb-local-steps", 1),
+            nb_workers=p["nb-workers"],
+            nb_byz=p["nb-decl-byz"],
+            nb_real_byz=p["nb-real-byz"],
+            b_hat=p["b-hat"],
+            rag=p.get("rag", False),
+            numb_labels=p.get("numb-labels"),
+            labelflipping=p.get("attack") == "LF",
+            gradient_clip=p.get("gradient-clip"),
+            server_clip=p.get("server-clip", False),
+            bucket_size=p.get("bucket-size", 1),
+            aggregator=p.get("aggregator", "average"),
+            pre_aggregator=p.get("pre-aggregator"),
+            nb_neighbors=p.get("nb-neighbors"),
+            sampling_ratio=p.get("sampling-ratio"),
+            neighbor_sampler=None,  # Set later if needed
+            reward_strategy=None,   # Set later if needed
+            mimic_learning_phase=p.get("mimic-learning-phase"),
+            method=p.get("method"),
+            comm_graph=None,        # Set later
+            dissensus=p.get("dissensus", False),
+            epsilon=p.get("epsilon", 1.0),
+        )
 
 
 def _get(section: DictConfig, *names: str, default=None):
@@ -43,7 +81,7 @@ def is_dynamic_topology(topology_cfg: DictConfig) -> bool:
 def _neighbor_count(cfg: DictConfig, nodes: int, is_dynamic: bool) -> int:
     if is_dynamic:
         sampling = float(cfg.topology.sampling)
-        return max(1, min(nodes - 1, int(round((nodes - 1) * sampling))))
+        return max(1, min(nodes - 1, round((nodes - 1) * sampling)))
     return int(cfg.topology.degree)
 
 

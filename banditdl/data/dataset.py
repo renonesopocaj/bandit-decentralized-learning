@@ -1,4 +1,3 @@
-# coding: utf-8
 ###
  # @file   dataset.py
  # @author John stephan <john.stephan@epfl.ch>
@@ -13,12 +12,16 @@
  # Dataset wrappers/helpers.
 ###
 
-import torch, torchvision, random
-import torchvision.transforms as T
+import random
+
 import numpy as np
+import torch
+import torchvision
+import torchvision.transforms as T
+
 from .dataset_utils import (
-  get_default_root,
   draw_indices,
+  get_default_root,
   pathological_classes_per_worker,
   pathological_grouped_classes,
   pathological_shards_per_worker,
@@ -199,7 +202,7 @@ def _uniform_train_test_split(indices, test_ratio, rng):
   if not indices:
     return [], []
   rng.shuffle(indices)
-  test_size = int(round(len(indices) * test_ratio))
+  test_size = round(len(indices) * test_ratio)
   test_size = max(0, min(test_size, len(indices) - 1)) if len(indices) > 1 else 0
   if test_size == 0:
     return indices, []
@@ -264,7 +267,7 @@ def make_train_validation_test_datasets(
     )
   rng = np.random.default_rng(split_seed)
   permuted = rng.permutation(total)
-  global_test_size = int(round(total * global_test_ratio))
+  global_test_size = round(total * global_test_ratio)
   # total - honest_workers >= 1 here, so the upper clamp stays positive.
   global_test_size = min(max(global_test_size, 1), total - honest_workers)
   global_test_indices = permuted[:global_test_size].tolist()

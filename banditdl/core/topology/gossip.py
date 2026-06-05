@@ -1,15 +1,15 @@
 """Laplacian-based gossip matrix construction."""
 
-import numpy as np
 import networkx as nx
+import numpy as np
 
 
 def LaplacianGossipMatrix(G):
     """Construct a gossip matrix based on the Laplacian of the graph.
-    
+
     Args:
         G: networkx Graph
-    
+
     Returns:
         Gossip mixing matrix W (ndarray)
     """

@@ -10,20 +10,20 @@ from omegaconf import DictConfig, OmegaConf
 
 from banditdl.experiments.config_adapter import build_engine_config, resolve_device
 from banditdl.experiments.engine import run_dynamic, run_fixed
-from banditdl.utils.seed_averaging import run_seed_averaged, seed_result_dir
 from banditdl.utils.plot_sweep_base import (
     STUDY_NAME,
-    build_axis_metadata,
-    enumerate_valid_param_dicts,
     _choices_from_spec,
     _conditions_met,
     _normalize_search_space,
+    _strip_meta,
+    _when_clause,
+    build_axis_metadata,
+    enumerate_valid_param_dicts,
     optuna_storage_url,
     plot_sweep_from_cfg,
-    _strip_meta,
     trial_folder_name,
-    _when_clause,
 )
+from banditdl.utils.seed_averaging import run_seed_averaged, seed_result_dir
 
 
 def _read_metric_file_max(metric_file: Path) -> float:
@@ -31,15 +31,21 @@ def _read_metric_file_max(metric_file: Path) -> float:
         raise FileNotFoundError(f"Missing metric file: {metric_file}")
 
     metric_values = []
-    for line in metric_file.read_text().splitlines():
+    for i, line in enumerate(metric_file.read_text().splitlines()):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         fields = stripped.split("\t")
-        if len(fields) >= 2:
-            metric_values.append(float(fields[1]))
+        try:
+            if len(fields) >= 2:
+                metric_values.append(float(fields[1]))
+            else:
+                print(f"Warning: Malformed line {i+1} in {metric_file} (too few fields)")
+        except ValueError:
+            print(f"Warning: Could not parse metric value on line {i+1} in {metric_file}")
+
     if not metric_values:
-        raise ValueError(f"No metric values found in: {metric_file}")
+        raise ValueError(f"No valid metric values found in: {metric_file}")
     return max(metric_values)
 
 

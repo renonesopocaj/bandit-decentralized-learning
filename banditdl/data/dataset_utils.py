@@ -2,6 +2,7 @@
 
 import os
 import pathlib
+
 import numpy as np
 
 
@@ -88,7 +89,7 @@ def pathological_classes_per_worker(targets, numb_labels, nb_workers, classes_pe
         label_indices = list(indices_per_label[label])
         rng.shuffle(label_indices)
         chunks = np.array_split(label_indices, len(owners))
-        for owner, chunk in zip(owners, chunks):
+        for owner, chunk in zip(owners, chunks, strict=False):
             worker_samples[owner].extend(int(i) for i in chunk)
 
     return worker_samples
@@ -158,7 +159,7 @@ def pathological_grouped_classes(
         label_indices = list(indices_per_label[label])
         rng.shuffle(label_indices)
         chunks = np.array_split(label_indices, len(owners))
-        for owner, chunk in zip(owners, chunks):
+        for owner, chunk in zip(owners, chunks, strict=False):
             group_pool[owner].extend(int(i) for i in chunk)
 
     worker_samples = {worker_id: [] for worker_id in range(nb_workers)}
@@ -166,7 +167,7 @@ def pathological_grouped_classes(
         pool = group_pool[g]
         rng.shuffle(pool)
         chunks = np.array_split(pool, len(group_workers[g]))
-        for worker_id, chunk in zip(group_workers[g], chunks):
+        for worker_id, chunk in zip(group_workers[g], chunks, strict=False):
             worker_samples[worker_id].extend(int(i) for i in chunk)
     return worker_samples
 

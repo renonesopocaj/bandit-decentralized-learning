@@ -26,7 +26,8 @@ from functools import lru_cache
 import numpy as np
 import torch
 import torchvision.transforms as T
-from datasets import Dataset as HFDataset, DatasetDict, load_dataset
+from datasets import Dataset as HFDataset
+from datasets import DatasetDict, load_dataset
 from torch.utils.data import DataLoader, Dataset, Subset
 
 FEMNIST_HF_NAME = "flwrlabs/femnist"
@@ -118,7 +119,7 @@ def _split_writers_for_global_test(
     all_writers = _writer_groups(pooled_split)
     writer_ids = sorted(all_writers.keys())
     rng = np.random.default_rng(seed)
-    nb_eval = max(1, int(round(global_test_ratio * len(writer_ids))))
+    nb_eval = max(1, round(global_test_ratio * len(writer_ids)))
     nb_eval = min(nb_eval, len(writer_ids) - 1)
     eval_choice = set(rng.choice(len(writer_ids), size=nb_eval, replace=False).tolist())
     train_writers: dict[str, list[int]] = {}
@@ -160,7 +161,7 @@ def _uniform_local_split(
     if not indices:
         return [], []
     rng.shuffle(indices)
-    test_size = int(round(len(indices) * local_test_ratio))
+    test_size = round(len(indices) * local_test_ratio)
     if len(indices) <= 1:
         return indices, []
     test_size = max(0, min(test_size, len(indices) - 1))

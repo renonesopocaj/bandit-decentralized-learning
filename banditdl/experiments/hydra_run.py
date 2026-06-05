@@ -8,8 +8,8 @@ from omegaconf import DictConfig, OmegaConf
 
 from banditdl.experiments.config_adapter import build_engine_config, resolve_device
 from banditdl.experiments.engine import run_dynamic, run_fixed
-from banditdl.utils.seed_averaging import run_seed_averaged
 from banditdl.utils.plotting import plot_all
+from banditdl.utils.seed_averaging import run_seed_averaged
 
 
 @hydra.main(version_base=None, config_path="../../conf", config_name="config")

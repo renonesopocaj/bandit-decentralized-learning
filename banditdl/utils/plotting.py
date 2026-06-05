@@ -1,7 +1,7 @@
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-import re
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,7 +17,6 @@ from banditdl.utils.metrics import (
     median,
     min_,
 )
-
 
 NODE_CURVE_COLORS = {
     "average": "tab:blue",
@@ -319,33 +318,12 @@ def plot_all(run_dir: Path, plots_dir: Path, run_label: str) -> None:
             Panel(
                 "Reward",
                 "Reward",
-                _node_series(MetricKey.REWARD_ALGORITHM)
-                + [
-                    Series(
-                        MetricKey.REWARD_ORACLE,
-                        "oracle average",
-                        mean,
-                        color="black",
-                        linestyle="--",
-                        marker=False,
-                    )
-                ],
+                [*_node_series(MetricKey.REWARD_ALGORITHM), Series(MetricKey.REWARD_ORACLE, "oracle average", mean, color="black", linestyle="--", marker=False)],
             ),
             Panel(
                 "Time-normalized reward",
                 "Reward",
-                _node_series(MetricKey.REWARD_ALGORITHM, transform=TimeAverage())
-                + [
-                    Series(
-                        MetricKey.REWARD_ORACLE,
-                        "oracle average",
-                        mean,
-                        TimeAverage(),
-                        color="black",
-                        linestyle="--",
-                        marker=False,
-                    )
-                ],
+                [*_node_series(MetricKey.REWARD_ALGORITHM, transform=TimeAverage()), Series(MetricKey.REWARD_ORACLE, "oracle average", mean, TimeAverage(), color="black", linestyle="--", marker=False)],
             ),
         ],
     )

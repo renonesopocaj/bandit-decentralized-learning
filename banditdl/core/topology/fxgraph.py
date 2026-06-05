@@ -1,17 +1,18 @@
 """Fixed-graph generation and Byzantine robustness checks."""
 
-import networkx as nx
 import random
+
+import networkx as nx
 
 
 def generate_connected_graph(n, e, seed=None):
     """Generate a random connected graph with n nodes and e edges.
-    
+
     Args:
         n: Number of nodes
         e: Number of edges
         seed: Random seed
-    
+
     Returns:
         Connected networkx Graph
     """
@@ -38,13 +39,13 @@ def generate_connected_graph(n, e, seed=None):
 
 def graph_byz_robust(G, byz):
     """Verify if a graph is Byzantine robust.
-    
+
     A graph is Byzantine robust if no honest node has a Byzantine majority.
-    
+
     Args:
         G: networkx Graph
         byz: List of Byzantine node indices
-    
+
     Returns:
         Tuple (is_robust, corrupted_nodes)
     """

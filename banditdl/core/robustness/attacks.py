@@ -1,7 +1,6 @@
 """Byzantine attack implementations for robust distributed learning."""
 
 import torch
-import copy
 
 # Import utility functions from the core math helpers
 from banditdl.utils.math_utils import clip_vector, line_maximize
@@ -93,7 +92,7 @@ def inf(attack, **kwargs):
 byzantine_attacks = {"SF": signflipping, "LF": labelflipping, "FOE": fall_of_empires, "ALIE": a_little_is_enough, "mimic": mimic,
                     "auto_ALIE": auto_ALIE, "auto_FOE": auto_FOE, "inf": inf}
 
-class ByzantineAttack(object):
+class ByzantineAttack:
 
     def __init__(self, attack_name, nb_real_byz, model_size, device, learning_phase, gradient_clip, robust_aggregator):
         self.attack_name = attack_name

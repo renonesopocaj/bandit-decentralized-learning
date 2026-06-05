@@ -28,11 +28,11 @@ from __future__ import annotations
 import pathlib
 from typing import Literal
 
-import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import networkx as nx  # type: ignore[import-untyped]
 import numpy as np
+from matplotlib import cm
 from omegaconf import OmegaConf
 
 WeightSource = Literal["sampler_probability", "neighbor_disagreement"]

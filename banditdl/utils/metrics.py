@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Protocol
 
 import numpy as np
 
@@ -182,7 +183,7 @@ def interpolate_to_steps(
     interpolated = np.zeros((target_steps.shape[0], flat.shape[1]), dtype=float)
     for series_id in range(flat.shape[1]):
         interpolated[:, series_id] = np.interp(target_steps, source_steps, flat[:, series_id])
-    reshaped = interpolated.reshape((target_steps.shape[0],) + moved.shape[1:])
+    reshaped = interpolated.reshape((target_steps.shape[0], *moved.shape[1:]))
     return np.moveaxis(reshaped, 0, time_axis)
 
 

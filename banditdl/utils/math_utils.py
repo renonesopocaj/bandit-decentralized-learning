@@ -1,8 +1,9 @@
 """Mathematical utility functions for robust aggregation and optimization."""
 
-import torch
 import math
 from itertools import combinations
+
+import torch
 
 
 def clip_vector(vector, clip_threshold):
@@ -15,7 +16,7 @@ def clip_vector(vector, clip_threshold):
 
 def line_maximize(scape, evals=16, start=0., delta=1., ratio=0.8):
     """Best-effort arg-maximize a scape: ℝ⁺⟶ ℝ, by mere exploration.
-    
+
     Args:
         scape: Function to best-effort arg-maximize
         evals: Maximum number of evaluations, must be a positive integer
@@ -68,7 +69,7 @@ def smoothed_weiszfeld(nb_vectors, vectors, nu=0.1, T=3):
     z = torch.zeros_like(vectors[0])
     # Calculate mask to exclude vectors containing infinite values
     mask = ~torch.any(torch.isinf(torch.stack(vectors)), dim=-1)
-    filtered_vectors = [v for v, m in zip(vectors, mask) if m]
+    filtered_vectors = [v for v, m in zip(vectors, mask, strict=False) if m]
     alphas = [1 / nb_vectors] * len(filtered_vectors)
     for _ in range(T):
         betas = list()
@@ -80,7 +81,7 @@ def smoothed_weiszfeld(nb_vectors, vectors, nu=0.1, T=3):
             else:
                 betas.append(alphas[i] / max(distance, nu))
         z.zero_()
-        for vector, beta in zip(filtered_vectors, betas):
+        for vector, beta in zip(filtered_vectors, betas, strict=False):
             z.add_(vector, alpha=beta)
         z.div_(sum(betas))
     return z
@@ -88,7 +89,7 @@ def smoothed_weiszfeld(nb_vectors, vectors, nu=0.1, T=3):
 
 def smoothed_weiszfeld2(nb_vectors, vectors, nu=0.1, T=3):
     """Smoothed Weiszfeld algorithm.
-    
+
     Args:
         nb_vectors: Number of vectors
         vectors: Non-empty list of vectors to aggregate
@@ -113,13 +114,13 @@ def smoothed_weiszfeld2(nb_vectors, vectors, nu=0.1, T=3):
 
 def compute_distances(vectors):
     """Compute all pairwise distances between vectors.
-    
+
     Args:
         vectors: List or tensor of vectors
     Returns:
         Distance matrix (n x n)
     """
-    if type(vectors) != torch.Tensor:
+    if not isinstance(vectors, torch.Tensor):
        vectors = torch.stack(vectors)
     distances = torch.cdist(vectors, vectors)
     # set non-finite values to inf
@@ -151,14 +152,14 @@ def get_vector_best_score(vectors, nb_byz, distances):
 
 def get_vector_scores(vectors, nb_byz, distances):
     """Get scores of all vectors for Multi-Krum aggregator.
-    
+
     Returns:
         List of (score, worker_id) tuples sorted by score
     """
     vectors = torch.stack(vectors)
     n_vectors = vectors.size(0)
     scores = []
-    
+
     for worker_id in range(n_vectors):
         # Create a mask for selecting all vectors except the current one
         mask = torch.ones(n_vectors, dtype=torch.bool)
@@ -170,7 +171,7 @@ def get_vector_scores(vectors, nb_byz, distances):
         # Compute the score
         score = distances_squared_to_vector[:n_vectors - nb_byz - 1].sum()
         scores.append((score.item(), worker_id))
-    
+
     return sorted(scores)
 
 
@@ -183,15 +184,15 @@ def average_nearest_neighbors(vectors, f, pivot=None):
             [average_nearest_neighbors(vectors, f, vector) for vector in vectors]
         )
     vector_scores = list()
-    
+
     for i in range(len(vectors)):
         #JS: compute distance to pivot
         distance = vectors[i].sub(pivot).norm().item()
         vector_scores.append((i, distance))
-    
+
     #JS: sort vector_scores by increasing distance to pivot
     vector_scores.sort(key=lambda x: x[1])
-    
+
     #JS: Return the average of the n-f closest vectors to pivot
     closest_vectors = [vectors[vector_scores[j][0]] for j in range(len(vectors) -f)]
     return torch.stack(closest_vectors).mean(dim=0)
@@ -208,7 +209,7 @@ def compute_min_diameter_subset(vectors, nb_workers, nb_byz):
         if math.isnan(dist):
             dist = float('inf')
         distances[(x,y)] = dist
-    
+
     min_diameter = float('inf')
     #JS: Get all subsets of size n - f
     all_subsets = list(combinations(range(nb_vectors), nb_vectors - nb_byz))
@@ -251,7 +252,7 @@ def compute_min_variance_subset(vectors, nb_workers, nb_byz):
             for vector2 in subset[i+1:]:
                 distance = distances.get((vector1, vector2), 0)
                 current_variance += distance**2
-        
+
         if min_variance > current_variance:
             min_variance = current_variance
             min_subset = subset

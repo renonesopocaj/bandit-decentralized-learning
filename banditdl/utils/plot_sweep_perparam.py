@@ -40,7 +40,7 @@ class PerParamPlotter(BaseSweepPlotter):
                 for combo in combos:
                     fixed_parts = []
                     involved = [x_axis.path, curve_axis.path]
-                    axis_value_pairs = list(zip(remainder, combo)) if remainder else []
+                    axis_value_pairs = list(zip(remainder, combo, strict=False)) if remainder else []
                     for axis_obj, fixed_val in axis_value_pairs:
                         fixed_parts.append((axis_obj.display_name, fixed_val))
                         involved.append(axis_obj.path)

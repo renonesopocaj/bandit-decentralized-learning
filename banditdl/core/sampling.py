@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 import math
 import random
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
-from mabwiser.mab import LearningPolicy, MAB
+from mabwiser.mab import MAB, LearningPolicy
 
 
 @dataclass(frozen=True)

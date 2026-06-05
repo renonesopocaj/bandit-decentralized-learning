@@ -12,7 +12,6 @@ from omegaconf import OmegaConf
 
 from banditdl.utils.metrics import MetricLoader, scalar_reduce_seed_outer
 
-
 DEFAULT_PLOT_METRICS: tuple[str, ...] = (
     "validation_accuracies",
     "validation_losses",
@@ -210,7 +209,7 @@ def column_key_for(metric_name, direction):
 
 
 def build_axis_metadata(search_space):
-    ordered_paths, _, display_names = _normalize_search_space(search_space)
+    ordered_paths, _, _display_names = _normalize_search_space(search_space)
     axes = []
     meta = {}
     for path in ordered_paths:
@@ -231,7 +230,7 @@ def build_axis_metadata(search_space):
     return axes, meta
 
 
-def _axis_values_from_rows(axis: "SweepAxis", rows: list["SweepRow"]) -> "SweepAxis":
+def _axis_values_from_rows(axis: SweepAxis, rows: list[SweepRow]) -> SweepAxis:
     if axis.values:
         return axis
     values = sorted({row.params[axis.path] for row in rows if axis.path in row.params}, key=_sort_key)

@@ -18,7 +18,6 @@ from typing import Any
 
 import numpy as np
 
-
 TEXT_METRIC_FILES: tuple[str, ...] = (
     "validation",
     "validation_worst",
