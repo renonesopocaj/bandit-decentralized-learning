@@ -14,9 +14,10 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import numpy as np
+
+from banditdl.experiments.config_schema import BanditDLConfig
 
 TEXT_METRIC_FILES: tuple[str, ...] = (
     "validation",
@@ -46,8 +47,8 @@ def seed_result_dir(result_dir: Path, seed: int) -> Path:
 
 
 def run_seed_averaged(
-    run_once: Callable[[dict[str, Any], Path, int, str], None],
-    params: dict[str, Any],
+    run_once: Callable[[BanditDLConfig, Path, int, str], None],
+    config: BanditDLConfig,
     result_dir: Path,
     base_seed: int,
     num_seeds: int,
@@ -56,10 +57,10 @@ def run_seed_averaged(
     """Run one configuration for consecutive seeds and aggregate its artifacts.
 
     Args:
-        run_once: Callable[[dict[str, Any], Path, int, str], None]
+        run_once: Callable[[BanditDLConfig, Path, int, str], None]
             Engine function that writes one standard result directory.
-        params: dict[str, Any]
-            Engine parameter dictionary for the configuration.
+        config: BanditDLConfig
+            Typed configuration object.
         result_dir: Path
             Public aggregate result directory for this trial.
         base_seed: int
@@ -77,7 +78,7 @@ def run_seed_averaged(
     seeds = [base_seed + offset for offset in range(num_seeds)]
     for seed in seeds:
         per_seed_dir = seed_result_dir(result_dir, seed)
-        run_once(params, per_seed_dir, seed, device)
+        run_once(config, per_seed_dir, seed, device)
     aggregate_seed_results(result_dir, seeds)
     return seeds
 

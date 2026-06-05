@@ -8,6 +8,7 @@ import optuna
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
+from banditdl.experiments.config_schema import BanditDLConfig
 from banditdl.experiments.config_adapter import build_engine_config, resolve_device
 from banditdl.experiments.engine import run_dynamic, run_fixed
 from banditdl.utils.plot_sweep_base import (
@@ -88,21 +89,26 @@ def _objective_from_params(
     trial_cfg = _copy_dict_config(base_cfg)
     _apply_trial_params(trial_cfg, trial_params)
 
+    # Convert to structured config
+    merged = OmegaConf.merge(OmegaConf.structured(BanditDLConfig), trial_cfg)
+    OmegaConf.resolve(merged)
+    config: BanditDLConfig = OmegaConf.to_object(merged)
+
     trials_root = output_root / "trials"
     folder_name = trial_folder_name(trial_params, axis_lookup)
     trial_result_dir = trials_root / folder_name / "results"
     trial_result_dir.mkdir(parents=True, exist_ok=True)
-    run_cfg = build_engine_config(trial_cfg)
-    num_seeds = int(trial_cfg.num_seeds)
+
+    run_cfg = build_engine_config(merged)
     device = resolve_device(trial_cfg)
     run_once = run_dynamic if run_cfg.run_mode == "dynamic" else run_fixed
 
     seeds = run_seed_averaged(
         run_once=run_once,
-        params=run_cfg.params,
+        config=config,
         result_dir=trial_result_dir,
-        base_seed=int(trial_cfg.seed),
-        num_seeds=num_seeds,
+        base_seed=config.seed,
+        num_seeds=config.num_seeds,
         device=device,
     )
 
@@ -114,7 +120,7 @@ def _objective_from_params(
     trial.set_user_attr("result_dir", str(trial_result_dir))
     trial.set_user_attr("result_path", str(trial_result_dir.relative_to(output_root)))
     trial.set_user_attr("seeds", seeds)
-    trial.set_user_attr("num_seeds", num_seeds)
+    trial.set_user_attr("num_seeds", config.num_seeds)
     trial.set_user_attr("resolved_params", trial_params)
     return validation_metric
 
@@ -185,20 +191,26 @@ def _run_best_trial_test_evaluation(best_trial, base_cfg: DictConfig, output_roo
     best_cfg = _copy_dict_config(base_cfg)
     _apply_trial_params(best_cfg, best_params)
 
+    # Convert to structured config
+    merged = OmegaConf.merge(OmegaConf.structured(BanditDLConfig), best_cfg)
+    # Enable evaluate_test specifically for this evaluation
+    merged.evaluation.evaluate_test = True
+    OmegaConf.resolve(merged)
+    config: BanditDLConfig = OmegaConf.to_object(merged)
+
     best_result_dir = output_root / "best_trial_test_eval" / "results"
     best_result_dir.mkdir(parents=True, exist_ok=True)
-    run_cfg = build_engine_config(best_cfg)
-    run_cfg.params["evaluate-test"] = True
-    num_seeds = int(best_cfg.num_seeds)
+
+    run_cfg = build_engine_config(merged)
     device = resolve_device(best_cfg)
     run_once = run_dynamic if run_cfg.run_mode == "dynamic" else run_fixed
 
     seeds = run_seed_averaged(
         run_once=run_once,
-        params=run_cfg.params,
+        config=config,
         result_dir=best_result_dir,
-        base_seed=int(best_cfg.seed),
-        num_seeds=num_seeds,
+        base_seed=config.seed,
+        num_seeds=config.num_seeds,
         device=device,
     )
 
