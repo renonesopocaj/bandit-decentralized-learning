@@ -22,6 +22,7 @@ class MetricKey(StrEnum):
     NEIGHBOR_DISAGREEMENT = "neighbor_disagreement"
     CONSENSUS_DRIFT = "consensus_drift"
     GRADIENT_NORMS = "gradient_norms"
+    SAMPLER_PROBABILITIES = "sampler_probabilities"
     SAMPLER_KL_TO_UNIFORM = "sampler_kl_to_uniform"
     SAMPLER_MIN_PROBABILITY = "sampler_min_probability"
     SAMPLER_MAX_PROBABILITY = "sampler_max_probability"
@@ -124,12 +125,55 @@ median = Aggregation("median", lambda values: _seed_outer_node_reduce(values, np
 max_ = Aggregation("max", lambda values: _seed_outer_node_reduce(values, np.nanmax))
 min_ = Aggregation("min", lambda values: _seed_outer_node_reduce(values, np.nanmin))
 
+SAMPLER_PROBABILITY_DERIVED = {
+    MetricKey.SAMPLER_KL_TO_UNIFORM,
+    MetricKey.SAMPLER_MIN_PROBABILITY,
+    MetricKey.SAMPLER_MAX_PROBABILITY,
+}
+
 
 def resolve_metric(metric: MetricKey | str) -> MetricKey:
     if isinstance(metric, MetricKey):
         return metric
     key = str(metric)
     return ALIASES.get(key, MetricKey(key))
+
+
+def sampler_probability_summary(metric: MetricKey, probabilities: np.ndarray) -> np.ndarray:
+    probabilities = np.asarray(probabilities, dtype=float)
+    if probabilities.ndim < 2:
+        raise ValueError("sampler probabilities must have worker and arm axes")
+
+    workers, arms = probabilities.shape[-2:]
+    mask = np.ones((workers, arms), dtype=bool)
+    for worker_id in range(min(workers, arms)):
+        mask[worker_id, worker_id] = False
+    valid = probabilities[..., mask].reshape(*probabilities.shape[:-2], workers, arms - 1)
+
+    if metric == MetricKey.SAMPLER_MIN_PROBABILITY:
+        return np.nanmin(valid, axis=-1)
+    if metric == MetricKey.SAMPLER_MAX_PROBABILITY:
+        return np.nanmax(valid, axis=-1)
+    if metric == MetricKey.SAMPLER_KL_TO_UNIFORM:
+        uniform = 1.0 / (arms - 1)
+        safe = np.maximum(valid, 1e-12)
+        return np.nansum(valid * np.log(safe / uniform), axis=-1)
+    raise ValueError(f"{metric.value} is not a sampler probability summary")
+
+
+def trim_unwritten_probability_rounds(probabilities: np.ndarray) -> np.ndarray:
+    probabilities = np.asarray(probabilities)
+    time_axis = 1 if probabilities.ndim == 4 else 0
+    other_axes = tuple(axis for axis in range(probabilities.ndim) if axis != time_axis)
+    completed = ~np.all(np.isnan(probabilities), axis=other_axes)
+    completed_indices = np.flatnonzero(completed)
+    if completed_indices.size == 0:
+        return np.take(probabilities, [], axis=time_axis)
+    return np.take(
+        probabilities,
+        np.arange(completed_indices[-1] + 1),
+        axis=time_axis,
+    )
 
 
 def read_eval(path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -157,6 +201,7 @@ def read_eval(path: Path) -> tuple[np.ndarray, np.ndarray]:
             values.append(value)
     if skipped:
         import warnings
+
         warnings.warn(
             f"{path}: skipped {skipped} malformed line(s); the file may be from a "
             "collided run-dir (check hydra.run.dir uniqueness).",
@@ -210,6 +255,13 @@ class MetricLoader:
             return TimeAverage()(self.load_values(MetricKey.REGRET))
         if key in TEXT_CANDIDATES:
             return self._load_text(key).values
+        if key in SAMPLER_PROBABILITY_DERIVED:
+            try:
+                return sampler_probability_summary(
+                    key, self.load_values(MetricKey.SAMPLER_PROBABILITIES)
+                )
+            except FileNotFoundError:
+                pass
 
         for filename in NPY_CANDIDATES.get(key, (f"{key.value}.npy",)):
             for path in self._npy_paths(filename):
@@ -217,6 +269,8 @@ class MetricLoader:
                     values = np.load(path)
                     if values.size == 0:
                         raise ValueError(f"{path} is empty")
+                    if key == MetricKey.SAMPLER_PROBABILITIES:
+                        values = trim_unwritten_probability_rounds(values)
                     return values
         raise FileNotFoundError(self.run_dir / f"{key.value}.npy")
 
@@ -234,6 +288,13 @@ class MetricLoader:
             return TimeAverage()(self.load_seed_values(MetricKey.REGRET))
         if key in TEXT_CANDIDATES:
             return self._load_seed_text(key)
+        if key in SAMPLER_PROBABILITY_DERIVED:
+            try:
+                return sampler_probability_summary(
+                    key, self.load_seed_values(MetricKey.SAMPLER_PROBABILITIES)
+                )
+            except FileNotFoundError:
+                pass
 
         for filename in NPY_CANDIDATES.get(key, (f"{key.value}.npy",)):
             by_seed_path, path = self._npy_paths(filename)
@@ -241,11 +302,15 @@ class MetricLoader:
                 values = np.load(by_seed_path)
                 if values.size == 0:
                     raise ValueError(f"{by_seed_path} is empty")
+                if key == MetricKey.SAMPLER_PROBABILITIES:
+                    values = trim_unwritten_probability_rounds(values)
                 return values
             if path.exists():
                 values = np.load(path)
                 if values.size == 0:
                     raise ValueError(f"{path} is empty")
+                if key == MetricKey.SAMPLER_PROBABILITIES:
+                    values = trim_unwritten_probability_rounds(values)
                 return values[np.newaxis, ...]
         raise FileNotFoundError(self.run_dir / f"{key.value}.npy")
 
@@ -256,14 +321,15 @@ class MetricLoader:
             MetricKey.REWARD_ALGORITHM,
             MetricKey.REGRET,
             MetricKey.GRADIENT_NORMS,
+            MetricKey.SAMPLER_PROBABILITIES,
             MetricKey.SAMPLER_KL_TO_UNIFORM,
         ):
             path = self.run_dir / f"{key.value}.npy"
             if path.exists():
-                return np.arange(np.load(path).shape[0])
+                return np.arange(self.load_values(key).shape[0])
             by_seed_path = self.run_dir / f"{key.value}_by_seed.npy"
             if by_seed_path.exists():
-                return np.arange(np.load(by_seed_path).shape[1])
+                return np.arange(self.load_seed_values(key).shape[1])
         validation = self._load_text(MetricKey.VALIDATION)
         return np.arange(int(np.max(validation.x)) + 1)
 

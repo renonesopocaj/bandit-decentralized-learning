@@ -24,7 +24,7 @@ class OptimizationConfig:
     nb_local_steps: int = 1
     batch_size: int = 32
     rounds: int = 100
-    nb_steps: int | None = None  # Alias support
+    nb_steps: int | None = None
 
 
 @dataclass
@@ -47,11 +47,7 @@ class AggregatorConfig:
 @dataclass
 class TopologyConfig:
     nodes: int = 10
-    degree: int = 3
-    sampling: float | None = None
-    neighbor_sampler: str = "uniform"
-    bandit_reward: str = "parameter_distance"
-    method: str | None = None
+    sampling: float = 0.2
 
 
 @dataclass
@@ -66,15 +62,12 @@ class EvaluationConfig:
 @dataclass
 class HeterogeneityConfig:
     method: str = "dirichlet"
+    clusters: int | None = None  # Number of clusters. Defaults to topology.nodes.
+
     alpha: float | None = None
-    numb_labels: int = 10
-    partition: str | None = None
-    classes_per_worker: int | None = None
-    nb_shards: int | None = None
-    shards_per_worker: int | None = None
-    nb_groups: int | None = None
     classes_per_group: int | None = None
     group_overlap: int = 0
+    gamma_similarity: float | None = None
 
 
 @dataclass
@@ -92,16 +85,21 @@ class BanditDLConfig:
     device: str = "auto"
     sampler: dict[str, Any] = field(default_factory=dict)
 
-    # Internal helpers computed at runtime
     @property
     def resolved_sampler_name(self) -> str:
-        if self.sampler and "name" in self.sampler:
-            return str(self.sampler["name"])
-        return self.topology.neighbor_sampler
+        return str(self.sampler.get("name", "uniform"))
+
+    @property
+    def resolved_reward_name(self) -> str:
+        return str(self.sampler.get("reward", "parameter_distance"))
 
     @property
     def nb_honests(self) -> int:
         return self.topology.nodes - self.adversary.byzcount
+
+    @property
+    def resolved_clusters(self) -> int:
+        return self.heterogeneity.clusters or self.nb_honests
 
     @property
     def effective_rounds(self) -> int:

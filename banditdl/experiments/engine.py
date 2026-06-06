@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import copy
+import logging
 import os
 import pathlib
 import random
 from dataclasses import replace
 
 import numpy as np
+import numpy.lib.format
 import torch
 
 from banditdl.core.sampling import (
@@ -14,16 +15,15 @@ from banditdl.core.sampling import (
     make_neighbor_sampler,
     make_reward_strategy,
 )
-from banditdl.core.topology.fxgraph import generate_connected_graph
-from banditdl.core.topology.graph import CommunicationNetwork
-from banditdl.core.worker.byzantine import ByzantineWorker, DecByzantineWorker
+from banditdl.core.worker.byzantine import ByzantineWorker
 from banditdl.core.worker.config import WorkerConfig
 from banditdl.core.worker.dynamic import DynamicWorker
-from banditdl.core.worker.fixed import FixedGraphWorker
 from banditdl.data import dataset
 from banditdl.experiments.config_schema import BanditDLConfig
 from banditdl.utils.math_utils import consensus_drift, neighbor_disagreement
 from banditdl.utils.results import make_result_file, store_result
+
+logger = logging.getLogger(__name__)
 
 
 def _setup_seed(seed: int) -> None:
@@ -41,228 +41,211 @@ def _progress_interval(rounds: int) -> int:
 
 
 def _should_log_step(current_step: int, rounds: int) -> bool:
-    return (
-        current_step in (0, rounds) or current_step % _progress_interval(rounds) == 0
-    )
+    return current_step in (0, rounds) or current_step % _progress_interval(rounds) == 0
 
 
-def _log_start(mode: str, cfg: BanditDLConfig, result_dir: pathlib.Path) -> None:
-    print(
-        f"[banditdl] starting {mode} run: "
+def _log_start(cfg: BanditDLConfig, result_dir: pathlib.Path) -> None:
+    logger.info(
+        "starting run: "
         f"dataset={cfg.dataset.dataset}, model={cfg.dataset.model}, nodes={cfg.topology.nodes}, "
         f"honest={cfg.nb_honests}, byzantine={cfg.adversary.byzcount}, "
-        f"rounds={cfg.effective_rounds}, seed={cfg.seed}, device={cfg.device}",
-        flush=True,
+        f"rounds={cfg.effective_rounds}, seed={cfg.seed}, device={cfg.device}"
     )
-    print(f"[banditdl] results: {result_dir}", flush=True)
+    logger.info(f"results: {result_dir}")
 
 
-def _log_progress(mode: str, current_step: int, cfg: BanditDLConfig, accuracy=None, validation_loss=None, train_loss=None) -> None:
-    message = f"[banditdl] {mode} round {current_step}/{cfg.effective_rounds}"
+def _log_progress(
+    current_step: int,
+    cfg: BanditDLConfig,
+    accuracy=None,
+    validation_loss=None,
+    train_loss=None,
+) -> None:
+    message = f"round {current_step}/{cfg.effective_rounds}"
     if accuracy is not None:
         message += f" | mean_accuracy={accuracy:.4f}"
     if validation_loss is not None:
         message += f" | val_loss={validation_loss:.4f}"
     if train_loss is not None:
         message += f" | train_loss={train_loss:.4f}"
-    print(message, flush=True)
+    logger.info(message)
 
 
-def _log_done(mode: str) -> None:
-    print(f"[banditdl] finished {mode} run", flush=True)
+def _log_done() -> None:
+    logger.info("finished run")
 
 
-def _raise_if_nonfinite_weights(workers, current_step: int, mode: str) -> None:
-    for worker in workers:
+def _raise_if_nonfinite_weights(honest_workers, current_step: int) -> None:
+    for worker in honest_workers:
         weights = worker.pull(None)
         if not torch.isfinite(weights).all():
             raise FloatingPointError(
-                f"{mode} produced non-finite weights at round {current_step} "
-                f"for worker {worker.worker_id}"
+                f"produced non-finite weights at round {current_step} for worker {worker.worker_id}"
             )
-
-
-def _record_evaluation(
-    workers,
-    fd_validation,
-    fd_validation_loss,
-    fd_train_loss,
-    current_step,
-    validation_steps,
-    validation_accuracies,
-    validation_losses,
-    train_losses,
-):
-    accs = [w.compute_validation_accuracy() for w in workers]
-    val_losses_round = [w.compute_validation_loss() for w in workers]
-    train_losses_round = [w.compute_train_loss() for w in workers]
-    mean_val_acc = sum(accs) / len(accs)
-    mean_val_loss = sum(val_losses_round) / len(val_losses_round)
-    mean_train_loss = sum(train_losses_round) / len(train_losses_round)
-
-    validation_steps.append(current_step)
-    validation_accuracies.append(accs)
-    validation_losses.append(val_losses_round)
-    train_losses.append(train_losses_round)
-    store_result(fd_validation, current_step, mean_val_acc)
-    store_result(fd_validation_loss, current_step, mean_val_loss)
-    store_result(fd_train_loss, current_step, mean_train_loss)
-
-    return mean_val_acc, mean_val_loss, mean_train_loss
-
-
-def _record_final_evaluation_if_needed(
-    cfg: BanditDLConfig,
-    workers,
-    fd_validation,
-    fd_validation_loss,
-    fd_train_loss,
-    validation_steps,
-    validation_accuracies,
-    validation_losses,
-    train_losses,
-):
-    if cfg.evaluation.evaluation_delta <= 0:
-        return None, None, None
-    if validation_steps and validation_steps[-1] == cfg.effective_rounds:
-        return None, None, None
-    return _record_evaluation(
-        workers,
-        fd_validation,
-        fd_validation_loss,
-        fd_train_loss,
-        cfg.effective_rounds,
-        validation_steps,
-        validation_accuracies,
-        validation_losses,
-        train_losses,
-    )
 
 
 class ResultTracker:
     """Consolidates metrics tracking, evaluation, and saving results."""
 
     def __init__(self, cfg: BanditDLConfig, result_dir: pathlib.Path, test_loader=None):
-        self.cfg = cfg
-        self.result_dir = result_dir
-        self.test_loader = test_loader
+        self.cfg, self.result_dir, self.test_loader = cfg, result_dir, test_loader
         self.result_dir.mkdir(parents=True, exist_ok=True)
-
-        self.fd_validation = (result_dir / "validation").open("w")
-        self.fd_validation_worst = (result_dir / "validation_worst").open("w")
-        self.fd_validation_loss = (result_dir / "validation_loss").open("w")
-        self.fd_train_loss = (result_dir / "train_loss").open("w")
-
-        make_result_file(self.fd_validation, ["Step number", "Cross-accuracy"])
-        make_result_file(self.fd_validation_worst, ["Step number", "Cross-accuracy"])
-        make_result_file(self.fd_validation_loss, ["Step number", "Cross-loss"])
-        make_result_file(self.fd_train_loss, ["Step number", "Cross-loss"])
-
         self.validation_steps = []
-        self.validation_accuracies = []
-        self.validation_losses = []
-        self.train_losses = []
-        self.neighbor_disagreement_history = []
-        self.consensus_drift_history = []
-        self.gradient_norm_history = []
+
+        # Progressive saving for all metrics
+        self.mmaps = {}
+        delta = cfg.evaluation.evaluation_delta
+        nb_evals = (cfg.effective_rounds // delta) + 1 if delta > 0 else 1
+
+        mmap_configs = {
+            "local_accuracy.npy": (nb_evals, cfg.nb_honests),
+            "local_loss.npy": (nb_evals, cfg.nb_honests),
+            "train_loss.npy": (nb_evals, cfg.nb_honests),
+            "neighbor_disagreement.npy": (cfg.effective_rounds, cfg.nb_honests),
+            "consensus_drift.npy": (cfg.effective_rounds, cfg.nb_honests),
+            "gradient_norms.npy": (cfg.effective_rounds, cfg.nb_honests),
+        }
+
+        for name, shape in mmap_configs.items():
+            path = result_dir / name
+            mmap = numpy.lib.format.open_memmap(path, dtype="float32", mode="w+", shape=shape)
+            mmap[:] = np.nan
+            self.mmaps[name] = mmap
+
+        self.algorithm_reward_history, self.oracle_reward_history = [], []
+        self.selected_neighbor_history, self.oracle_neighbor_history = [], []
+        self.reward_min_history, self.reward_max_history = [], []
+
+        self.prob_file = result_dir / "sampler_probabilities.npy"
+        self.probs_mmap = None
+        if cfg.effective_rounds > 0:
+            self.probs_mmap = numpy.lib.format.open_memmap(
+                self.prob_file,
+                dtype="float32",
+                mode="w+",
+                shape=(cfg.effective_rounds, cfg.nb_honests, cfg.topology.nodes),
+            )
+            self.probs_mmap[:] = np.nan
+            self.probs_mmap.flush()
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.fd_validation.close()
-        self.fd_validation_worst.close()
-        self.fd_validation_loss.close()
-        self.fd_train_loss.close()
+        for mmap in self.mmaps.values():
+            mmap.flush()
+        if self.probs_mmap is not None:
+            self.probs_mmap.flush()
 
-    def evaluate_step(self, current_step, workers, mode):
-        mean_acc = None
-        mean_val_loss = None
-        mean_train_loss = None
+    def save_audit(self, audit_data: dict):
+        import json
+        with (self.result_dir / "audit.json").open("w") as f:
+            json.dump(audit_data, f, indent=2)
 
-        if self.cfg.evaluation.evaluation_delta > 0 and current_step % self.cfg.evaluation.evaluation_delta == 0:
-            (
-                mean_acc,
-                mean_val_loss,
-                mean_train_loss,
-            ) = _record_evaluation(
-                workers,
-                self.fd_validation,
-                self.fd_validation_loss,
-                self.fd_train_loss,
-                current_step,
-                self.validation_steps,
-                self.validation_accuracies,
-                self.validation_losses,
-                self.train_losses,
+    def evaluate_step(self, step, honest_workers):
+        mean_acc, mean_v, mean_t = None, None, None
+        delta = self.cfg.evaluation.evaluation_delta
+        if delta > 0 and step % delta == 0:
+            eval_idx = step // delta
+            accs = [w.compute_validation_accuracy() for w in honest_workers]
+            v_losses = [w.compute_validation_loss() for w in honest_workers]
+            t_losses = [w.compute_train_loss() for w in honest_workers]
+
+            self.mmaps["local_accuracy.npy"][eval_idx] = np.array(accs, dtype="float32")
+            self.mmaps["local_loss.npy"][eval_idx] = np.array(v_losses, dtype="float32")
+            self.mmaps["train_loss.npy"][eval_idx] = np.array(t_losses, dtype="float32")
+
+            mean_acc, mean_v, mean_t = sum(accs) / len(accs), sum(v_losses) / len(v_losses), sum(t_losses) / len(t_losses)
+            self.validation_steps.append(step)
+
+            if eval_idx % 5 == 0:
+                for name in ["local_accuracy.npy", "local_loss.npy", "train_loss.npy"]:
+                    self.mmaps[name].flush()
+
+        if _should_log_step(step, self.cfg.effective_rounds):
+            _log_progress(step, self.cfg, mean_acc, mean_v, mean_t)
+        return mean_acc, mean_v, mean_t
+
+    def record_gradient_norms(self, step, honest_workers):
+        """Record the gradient norm for each worker."""
+        if step < self.cfg.effective_rounds:
+            norms = [w.last_gradient_norm for w in honest_workers]
+            self.mmaps["gradient_norms.npy"][step] = np.array(norms, dtype="float32")
+
+    def record_drift(self, step, disagreement, consensus):
+        if step < self.cfg.effective_rounds:
+            dis_val = disagreement.cpu().numpy().astype("float32")
+            con_val = consensus.cpu().numpy().astype("float32")
+            self.mmaps["neighbor_disagreement.npy"][step] = dis_val
+            self.mmaps["consensus_drift.npy"][step] = con_val
+
+    def record_probabilities(self, step, honest_workers):
+        if self.probs_mmap is not None and step < self.cfg.effective_rounds:
+            probs = np.stack(
+                [_full_sampler_probability_vector(w, self.cfg.topology.nodes) for w in honest_workers]
             )
+            self.probs_mmap[step] = probs.astype("float32")
+            if step % 10 == 0:
+                self.probs_mmap.flush()
 
-        if _should_log_step(current_step, self.cfg.effective_rounds):
-            _log_progress(
-                mode,
-                current_step,
-                self.cfg,
-                mean_acc,
-                mean_val_loss,
-                mean_train_loss,
-            )
-        return mean_acc, mean_val_loss, mean_train_loss
+    def record_rewards(self, alg, ora, sel, ora_n, r_min, r_max):
+        self.algorithm_reward_history.append(alg.copy())
+        self.oracle_reward_history.append(np.array(ora))
+        self.selected_neighbor_history.append(sel.copy())
+        self.oracle_neighbor_history.append(np.stack(ora_n))
+        self.reward_min_history.append(r_min.copy())
+        self.reward_max_history.append(r_max.copy())
 
-    def record_gradient_norms(self, workers):
-        self.gradient_norm_history.append(
-            np.array([w.last_gradient_norm for w in workers], dtype=float)
-        )
+    def save_snapshot(self):
+        """Flush all mmaps and save dynamic reward histories."""
+        for mmap in self.mmaps.values():
+            mmap.flush()
+        if self.probs_mmap is not None:
+            self.probs_mmap.flush()
 
-    def record_drift(self, disagreement, consensus):
-        self.neighbor_disagreement_history.append(disagreement.cpu().numpy())
-        self.consensus_drift_history.append(consensus.cpu().numpy())
+        d = self.result_dir
+        if self.algorithm_reward_history:
+            _atomic_save(d / "reward_algorithm.npy", self.algorithm_reward_history)
+            _atomic_save(d / "reward_oracle.npy", self.oracle_reward_history)
+            _atomic_save(d / "reward_selected_min.npy", self.reward_min_history)
+            _atomic_save(d / "reward_selected_max.npy", self.reward_max_history)
+            _atomic_save(d / "selected_neighbors.npy", self.selected_neighbor_history, dtype=int)
+            _atomic_save(d / "oracle_neighbors.npy", self.oracle_neighbor_history, dtype=int)
 
-    def finalize(self, workers, mode):
-        final_accuracy, final_val_loss, final_train_loss = _record_final_evaluation_if_needed(
-            self.cfg,
-            workers,
-            self.fd_validation,
-            self.fd_validation_loss,
-            self.fd_train_loss,
-            self.validation_steps,
-            self.validation_accuracies,
-            self.validation_losses,
-            self.train_losses,
-        )
-        if _should_log_step(self.cfg.effective_rounds, self.cfg.effective_rounds) and final_accuracy is not None:
-            _log_progress(
-                mode,
-                self.cfg.effective_rounds,
-                self.cfg,
-                final_accuracy,
-                final_val_loss,
-                final_train_loss,
-            )
+            regret = np.array(self.oracle_reward_history) - np.array(self.algorithm_reward_history)
+            _atomic_save(d / "regret.npy", regret)
 
-        if self.validation_accuracies:
-            worst_idx = min(range(len(workers)), key=lambda i: self.validation_accuracies[-1][i])
-            for step, accs in zip(self.validation_steps, self.validation_accuracies, strict=True):
-                store_result(self.fd_validation_worst, step, accs[worst_idx])
+    def finalize(self, honest_workers):
+        # Ensure final evaluation is recorded
+        self.evaluate_step(self.cfg.effective_rounds, honest_workers)
+
+        if len(self.validation_steps) > 0:
+            eval_idx = (self.cfg.effective_rounds // self.cfg.evaluation.evaluation_delta)
+            last_accs = self.mmaps["local_accuracy.npy"][eval_idx]
+            # Replace NaNs with infinity for min finding
+            last_accs_clean = np.where(np.isnan(last_accs), np.inf, last_accs)
+            worst_idx = np.argmin(last_accs_clean)
+            logger.info(f"Final Worst Local Client Accuracy: {last_accs[worst_idx]:.4f}")
 
         if self.cfg.evaluation.evaluate_test and self.test_loader:
-            fd_test = (self.result_dir / "test").open("w")
-            make_result_file(fd_test, ["Step number", "Cross-accuracy"])
-            test_accuracies = [w.compute_accuracy_on_loader(self.test_loader) for w in workers]
-            store_result(fd_test, self.cfg.effective_rounds, sum(test_accuracies) / len(test_accuracies))
-            fd_test.close()
+            accs = [w.compute_accuracy_on_loader(self.test_loader) for w in honest_workers]
+            global_acc_arr = np.array(accs, dtype="float32")
+            np.save(self.result_dir / "global_accuracy.npy", global_acc_arr)
+            logger.info(f"Final Mean Global Accuracy: {np.mean(global_acc_arr):.4f}")
 
-        np.save(os.path.join(self.result_dir, "validation_accuracies.npy"), np.array(self.validation_accuracies))
-        np.save(os.path.join(self.result_dir, "validation_losses.npy"), np.array(self.validation_losses))
-        np.save(os.path.join(self.result_dir, "train_losses.npy"), np.array(self.train_losses))
-        np.save(os.path.join(self.result_dir, "neighbor_disagreement.npy"), np.array(self.neighbor_disagreement_history))
-        np.save(os.path.join(self.result_dir, "consensus_drift.npy"), np.array(self.consensus_drift_history))
-        np.save(os.path.join(self.result_dir, "gradient_norms.npy"), np.array(self.gradient_norm_history))
-
+        self.save_snapshot()
         with torch.no_grad():
-            final_weights = torch.stack([w.pull(None) for w in workers])
-            pairwise_distance_final = torch.cdist(final_weights, final_weights).cpu().numpy()
-        np.save(os.path.join(self.result_dir, "pairwise_model_distance_final.npy"), pairwise_distance_final)
-        _log_done(mode)
+            weights = torch.stack([w.pull(None) for w in honest_workers])
+            dist = torch.cdist(weights, weights).cpu().numpy()
+        np.save(self.result_dir / "pairwise_model_distance_final.npy", dist)
+        _log_done()
+
+
+def _atomic_save(path: pathlib.Path, values, dtype=None) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("wb") as fd:
+        np.save(fd, np.asarray(values, dtype=dtype))
+    os.replace(tmp, path)
 
 
 def _build_worker_config(cfg: BanditDLConfig, device: str) -> WorkerConfig:
@@ -279,7 +262,9 @@ def _build_worker_config(cfg: BanditDLConfig, device: str) -> WorkerConfig:
         nb_workers=cfg.topology.nodes,
         nb_byz=cfg.adversary.byzcount,
         nb_real_byz=cfg.adversary.byzcount,
-        b_hat=cfg.adversary.byzantine_budget if cfg.adversary.byzantine_budget is not None else cfg.adversary.byzcount,
+        b_hat=cfg.adversary.byzantine_budget
+        if cfg.adversary.byzantine_budget is not None
+        else cfg.adversary.byzcount,
         attack=cfg.adversary.attack,
         rag=cfg.aggregator.rag or cfg.topology.sampling is not None,
         numb_labels=cfg.dataset.numb_labels,
@@ -289,44 +274,36 @@ def _build_worker_config(cfg: BanditDLConfig, device: str) -> WorkerConfig:
         bucket_size=cfg.aggregator.bucket_size,
         aggregator=cfg.aggregator.aggregator,
         pre_aggregator=cfg.aggregator.pre_aggregator,
-        nb_neighbors=cfg.topology.degree,
         sampling_ratio=cfg.topology.sampling,
         mimic_learning_phase=cfg.adversary.mimic_learning_phase,
-        method=cfg.topology.method or cfg.topology.neighbor_sampler,
-        epsilon=1.0,
     )
 
 
-def _init_workers(cfg: BanditDLConfig, train_loader_dict, local_test_loader_dict, device: str, comm_graph=None, dissensus=False):
+def _init_workers(cfg: BanditDLConfig, train_dict, test_dict, device: str):
     workers = []
     base_config = _build_worker_config(cfg, device)
-
-    if comm_graph is not None:
-        for worker_id in range(cfg.nb_honests):
-            config = replace(base_config, comm_graph=comm_graph, dissensus=dissensus)
-            w = FixedGraphWorker(worker_id, train_loader_dict[worker_id], local_test_loader_dict[worker_id], config)
-            if worker_id > 0:
-                w.model.load_state_dict(workers[0].model.state_dict())
-            workers.append(w)
-    else:
-        for worker_id in range(cfg.nb_honests):
-            sampler_params = dict(cfg.sampler.get("params", {}) if cfg.sampler else {})
-            sampler_context = SamplerContext(
-                worker_id=worker_id,
-                nodes=cfg.topology.nodes,
-                k=base_config.nb_neighbors or 1,
-                horizon=cfg.effective_rounds + 1,
-                seed=cfg.seed + worker_id,
-            )
-            neighbor_sampler = make_neighbor_sampler(cfg.resolved_sampler_name, context=sampler_context, params=sampler_params)
-            reward_strategy = make_reward_strategy(cfg.topology.bandit_reward)
-
-            config = replace(base_config, neighbor_sampler=neighbor_sampler, reward_strategy=reward_strategy)
-            w = DynamicWorker(worker_id, train_loader_dict[worker_id], local_test_loader_dict[worker_id], config)
-            if worker_id > 0:
-                w.model.load_state_dict(workers[0].model.state_dict())
-            workers.append(w)
-
+    for worker_id in range(cfg.nb_honests):
+        s_params = dict(cfg.sampler.get("params", {}) if cfg.sampler else {})
+        s_ctx = SamplerContext(
+            worker_id,
+            cfg.topology.nodes,
+            1,
+            cfg.effective_rounds + 1,
+            cfg.seed + worker_id,
+        )
+        config = replace(
+            base_config,
+            neighbor_sampler=make_neighbor_sampler(
+                cfg.resolved_sampler_name,
+                context=s_ctx,
+                params=s_params,
+            ),
+            reward_strategy=make_reward_strategy(cfg.resolved_reward_name),
+        )
+        w = DynamicWorker(worker_id, train_dict[worker_id], test_dict[worker_id], config)
+        if worker_id > 0:
+            w.model.load_state_dict(workers[0].model.state_dict())
+        workers.append(w)
     return workers
 
 
@@ -340,212 +317,161 @@ def _best_fixed_subset(scores, worker_id: int, k: int):
 
 def _mean_selected_reward(rewards) -> float:
     rewards = list(rewards)
-    if not rewards:
-        return 0.0
-    return float(sum(rewards) / len(rewards))
+    return float(sum(rewards) / len(rewards)) if rewards else 0.0
 
 
-def _dynamic_candidate_weights(w, honest_weights, byz_workers, current_step):
-    candidate_weights = {
-        worker_id: weight
-        for worker_id, weight in enumerate(honest_weights)
-        if worker_id != w.worker_id
-    }
-    context = {"honest_weights": honest_weights, "step": current_step}
-    for byz_worker in byz_workers:
-        weight = copy.deepcopy(byz_worker).pull(context)
+def _dynamic_candidate_weights(w, honest_weights, byz_by_id):
+    weights = {i: weight for i, weight in enumerate(honest_weights) if i != w.worker_id}
+    for byz_id, byz in byz_by_id.items():
+        weight = byz.pull()
         if weight is not None:
-            candidate_weights[byz_worker.worker_id] = weight
-    return candidate_weights
+            weights[byz_id] = weight
+    return weights
 
 
 def _full_sampler_probability_vector(worker, nb_total: int) -> np.ndarray:
-    population = [i for i in range(nb_total) if i != worker.worker_id]
-    probabilities_by_arm = worker.neighbor_sampler.probabilities(
-        population,
-        worker.nb_neighbors,
-    )
+    pop = [i for i in range(nb_total) if i != worker.worker_id]
+    probs_by_arm = worker.neighbor_sampler.probabilities(pop, worker.nb_neighbors)
     row = np.zeros(nb_total, dtype=float)
-    for arm in population:
-        row[arm] = float(probabilities_by_arm[arm])
+    for arm in pop:
+        row[arm] = float(probs_by_arm[arm])
     return row
 
 
-def _sampler_probability_stats(worker) -> tuple[float, float, float]:
-    population = list(range(worker.nb_honest + worker.nb_byz))
-    population.remove(worker.worker_id)
-    probabilities_by_arm = worker.neighbor_sampler.probabilities(
-        population,
-        worker.nb_neighbors,
+def _step_dynamic(
+    step, cfg, honest_workers, byz_by_id, h_weights, cum_arm_r, cum_alg_r, tracker
+):
+    selected_round = np.full((cfg.nb_honests, honest_workers[0].nb_neighbors), -1, dtype=int)
+    r_min_round, r_max_round = np.full(cfg.nb_honests, np.nan), np.full(cfg.nb_honests, np.nan)
+
+    for w in honest_workers:
+        neighbor_indices = w._sample_neighbors()
+        c_weights = _dynamic_candidate_weights(w, h_weights, byz_by_id)
+        sel_ids = [i for i in neighbor_indices if i in c_weights]
+
+        candidate_ids = list(c_weights)
+        c_rewards = w.reward_strategy.score(w.pull(None), [c_weights[i] for i in candidate_ids])
+        rewards_by_id = dict(zip(candidate_ids, c_rewards, strict=True))
+        cum_arm_r[w.worker_id, candidate_ids] += c_rewards
+
+        n_weights = [c_weights[i] for i in sel_ids]
+        selected_round[w.worker_id, : len(sel_ids)] = sel_ids
+        s_rewards = [rewards_by_id[i] for i in sel_ids]
+        if s_rewards:
+            r_min_round[w.worker_id], r_max_round[w.worker_id] = min(s_rewards), max(s_rewards)
+            cum_alg_r[w.worker_id] += _mean_selected_reward(s_rewards)
+
+        w.num_selected_byz.append(len([i for i in sel_ids if i >= cfg.nb_honests]))
+        w.observe_neighbors(sel_ids, n_weights)
+        w.aggregate(n_weights)
+
+    ora_n_round, ora_r_round = [], []
+    for w in honest_workers:
+        oids, oreward = _best_fixed_subset(cum_arm_r[w.worker_id], w.worker_id, w.nb_neighbors)
+        ora_n_round.append(oids)
+        ora_r_round.append(oreward)
+
+    tracker.record_rewards(
+        cum_alg_r, ora_r_round, selected_round, ora_n_round, r_min_round, r_max_round
     )
-    probabilities = np.array(
-        [probabilities_by_arm[arm] for arm in population],
-        dtype=float,
-    )
-    uniform_probability = 1.0 / len(population)
-    kl_to_uniform = float(
-        np.sum(probabilities * np.log(np.maximum(probabilities, 1e-12) / uniform_probability))
-    )
-    return kl_to_uniform, float(probabilities.min()), float(probabilities.max())
+    with torch.no_grad():
+        updated = [w.pull(None) for w in honest_workers]
+        n_matrix = selected_round.copy()
+        n_matrix[n_matrix >= cfg.nb_honests] = -1
+        tracker.record_drift(
+            step,
+            neighbor_disagreement(updated, neighbor_indices=n_matrix.tolist()),
+            consensus_drift(updated),
+        )
 
 
-def _run_experiment(cfg: BanditDLConfig, result_dir: pathlib.Path, seed: int, device: str, mode: str) -> None:
+def run_experiment(
+    cfg: BanditDLConfig,
+    result_dir: pathlib.Path,
+    seed: int,
+    device: str,
+) -> None:
     _setup_seed(seed)
-    _log_start(mode, cfg, result_dir)
-
-    train_loader_dict, local_test_loader_dict, test_loader = dataset.make_train_validation_test_datasets(
-        cfg.dataset.dataset,
-        heterogeneity=cfg.heterogeneity.method != "iid", # Simplified hetero check
-        numb_labels=cfg.dataset.numb_labels,
-        alpha_dirichlet=cfg.heterogeneity.alpha,
-        distinct_datasets=cfg.dataset.mode == "writer_per_node",
-        nb_datapoints=None, # Could be added to config if needed
-        honest_workers=cfg.nb_honests,
-        train_batch=cfg.optimization.batch_size,
-        test_batch=100, # Batch size test
-        global_test_ratio=cfg.evaluation.global_test_ratio,
-        local_test_ratio=cfg.evaluation.local_test_ratio,
-        split_seed=cfg.evaluation.split_seed,
-        partition_method=cfg.heterogeneity.method,
-        partition_style=cfg.heterogeneity.partition,
-        classes_per_worker=cfg.heterogeneity.classes_per_worker,
-        nb_shards=cfg.heterogeneity.nb_shards,
-        shards_per_worker=cfg.heterogeneity.shards_per_worker,
-        nb_groups=cfg.heterogeneity.nb_groups,
-        classes_per_group=cfg.heterogeneity.classes_per_group,
-        group_overlap=cfg.heterogeneity.group_overlap,
-        dataset_mode=cfg.dataset.mode,
-        nb_writers_limit=cfg.dataset.nb_writers_limit,
+    _log_start(cfg, result_dir)
+    train_dict, local_test_dict, test_loader, dist_stats = (
+        dataset.make_train_validation_test_datasets(
+            cfg.dataset.dataset,
+            numb_labels=cfg.dataset.numb_labels,
+            alpha_dirichlet=cfg.heterogeneity.alpha,
+            honest_workers=cfg.nb_honests,
+            train_batch=cfg.optimization.batch_size,
+            test_batch=100,
+            global_test_ratio=cfg.evaluation.global_test_ratio,
+            local_test_ratio=cfg.evaluation.local_test_ratio,
+            split_seed=cfg.evaluation.split_seed,
+            partition_method=cfg.heterogeneity.method,
+            clusters=cfg.heterogeneity.clusters,
+            classes_per_group=cfg.heterogeneity.classes_per_group,
+            group_overlap=cfg.heterogeneity.group_overlap,
+            gamma_similarity=cfg.heterogeneity.gamma_similarity,
+            dataset_mode=cfg.dataset.mode,
+            nb_writers_limit=cfg.dataset.nb_writers_limit,
+        )
     )
 
-    comm_graph = None
-    adjacency_honest = None
-    if mode == "fixed":
-        nb_edges = cfg.topology.nodes * cfg.topology.degree // 2
-        g = generate_connected_graph(cfg.topology.nodes, nb_edges, seed=seed)
-        comm_graph = CommunicationNetwork(g, weights_method="metropolis", device=device if device != "auto" else "cpu")
-        adjacency_honest = torch.as_tensor(np.asarray(comm_graph.adjacency_matrix[: cfg.nb_honests, : cfg.nb_honests]), dtype=torch.float32, device=device)
-
-    workers = _init_workers(cfg, train_loader_dict, local_test_loader_dict, device, comm_graph=comm_graph, dissensus=(cfg.adversary.attack == "dissensus"))
-    base_worker_config = _build_worker_config(cfg, device)
-    # Correctly inject graph for fixed mode workers
-    if mode == "fixed":
-        base_worker_config = replace(base_worker_config, comm_graph=comm_graph)
-
-    byz_workers = [ByzantineWorker(i, workers[0].model_size, base_worker_config) for i in range(cfg.nb_honests, cfg.topology.nodes)]
-
-    byz_workers_by_id = {byz.worker_id: byz for byz in byz_workers}
-    dec_byz_workers = {i: DecByzantineWorker(i, cfg.nb_honests, base_worker_config) for i in range(cfg.nb_honests, cfg.topology.nodes)} if mode == "fixed" else {}
+    honest_workers = _init_workers(cfg, train_dict, local_test_dict, device)
+    bw_cfg = _build_worker_config(cfg, device)
+    byz_workers = [
+        ByzantineWorker(i, honest_workers[0].model_size, bw_cfg)
+        for i in range(cfg.nb_honests, cfg.topology.nodes)
+    ]
+    byz_by_id = {byz.worker_id: byz for byz in byz_workers}
 
     with ResultTracker(cfg, result_dir, test_loader) as tracker:
-        cumulative_arm_rewards = np.zeros((cfg.nb_honests, cfg.topology.nodes))
-        cumulative_algorithm_rewards = np.zeros(cfg.nb_honests)
-        algorithm_reward_history, oracle_reward_history, selected_neighbor_history, oracle_neighbor_history = [], [], [], []
-        sampler_kl_history, sampler_min_prob_history, sampler_max_prob_history = [], [], []
-        reward_min_history, reward_max_history = [], []
+        tracker.save_audit(
+            {
+                "partition": {
+                    "method": cfg.heterogeneity.method,
+                    "seed": cfg.evaluation.split_seed,
+                    "requested_clusters": cfg.heterogeneity.clusters,
+                    "resolved_clusters": cfg.resolved_clusters,
+                    "alpha": cfg.heterogeneity.alpha,
+                    "classes_per_group": cfg.heterogeneity.classes_per_group,
+                    "group_overlap": cfg.heterogeneity.group_overlap,
+                    "gamma_similarity": cfg.heterogeneity.gamma_similarity,
+                },
+                "distribution": dist_stats,
+                "participants": {
+                    "total": cfg.topology.nodes,
+                    "honest": cfg.nb_honests,
+                    "byzantine": cfg.adversary.byzcount,
+                },
+            }
+        )
+        cum_arm_r, cum_alg_r = (
+            np.zeros((cfg.nb_honests, cfg.topology.nodes)),
+            np.zeros(cfg.nb_honests),
+        )
 
-        for current_step in range(cfg.effective_rounds + 1):
-            tracker.evaluate_step(current_step, workers, mode)
-
-            if current_step < cfg.effective_rounds:
-                for w in workers:
+        for step in range(cfg.effective_rounds + 1):
+            tracker.evaluate_step(step, honest_workers)
+            if step < cfg.effective_rounds:
+                for w in honest_workers:
                     w.train()
-                tracker.record_gradient_norms(workers)
-                honest_weights = [w.pull(None) for w in workers]
+                tracker.record_gradient_norms(step, honest_workers)
+                tracker.record_probabilities(step, honest_workers)
+                h_weights = [w.pull(None) for w in honest_workers]
 
-                if mode == "dynamic":
-                    selected_round = np.full((cfg.nb_honests, workers[0].nb_neighbors), -1, dtype=int)
-                    kl_round, min_prob_round, max_prob_round = np.zeros(cfg.nb_honests), np.zeros(cfg.nb_honests), np.zeros(cfg.nb_honests)
-                    reward_min_round, reward_max_round = np.full(cfg.nb_honests, np.nan), np.full(cfg.nb_honests, np.nan)
+                # Inform Byzantines once per round
+                for byz in byz_workers:
+                    byz.inform(h_weights, step)
 
-                    for w in workers:
-                        kl_round[w.worker_id], min_prob_round[w.worker_id], max_prob_round[w.worker_id] = _sampler_probability_stats(w)
-                        neighbor_indices = w._sample_neighbors()
-                        candidate_weights = _dynamic_candidate_weights(w, honest_weights, byz_workers, current_step)
-                        selected_ids = [i for i in neighbor_indices if i in candidate_weights]
-
-                        for nid in selected_ids:
-                            if nid >= cfg.nb_honests:
-                                weight = byz_workers_by_id[nid].pull({"honest_weights": honest_weights, "step": current_step})
-                                if weight is not None:
-                                    candidate_weights[nid] = weight
-
-                        candidate_ids = list(candidate_weights)
-                        candidate_rewards = w.reward_strategy.score(w.pull(None), [candidate_weights[i] for i in candidate_ids])
-                        rewards_by_id = dict(zip(candidate_ids, candidate_rewards, strict=True))
-                        cumulative_arm_rewards[w.worker_id, candidate_ids] += candidate_rewards
-
-                        neighbor_weights = [candidate_weights[i] for i in selected_ids]
-                        selected_round[w.worker_id, :len(selected_ids)] = selected_ids
-                        selected_rewards = [rewards_by_id[i] for i in selected_ids]
-                        if selected_rewards:
-                            reward_min_round[w.worker_id], reward_max_round[w.worker_id] = min(selected_rewards), max(selected_rewards)
-                            cumulative_algorithm_rewards[w.worker_id] += _mean_selected_reward(selected_rewards)
-
-                        w.num_selected_byz.append(len([i for i in selected_ids if i >= cfg.nb_honests]))
-                        w.observe_neighbors(selected_ids, neighbor_weights)
-                        w.aggregate(neighbor_weights)
-
-                    sampler_kl_history.append(kl_round)
-                    sampler_min_prob_history.append(min_prob_round)
-                    sampler_max_prob_history.append(max_prob_round)
-                    reward_min_history.append(reward_min_round)
-                    reward_max_history.append(reward_max_round)
-
-                    oracle_neighbors_round, oracle_rewards_round = [], []
-                    for w in workers:
-                        oids, oreward = _best_fixed_subset(cumulative_arm_rewards[w.worker_id], worker_id=w.worker_id, k=w.nb_neighbors)
-                        oracle_neighbors_round.append(oids)
-                        oracle_rewards_round.append(oreward)
-                    algorithm_reward_history.append(cumulative_algorithm_rewards.copy())
-                    oracle_reward_history.append(np.array(oracle_rewards_round))
-                    selected_neighbor_history.append(selected_round)
-                    oracle_neighbor_history.append(np.stack(oracle_neighbors_round))
-
-                    with torch.no_grad():
-                        updated = [w.pull(None) for w in workers]
-                        neighbor_matrix = selected_round.copy()
-                        neighbor_matrix[neighbor_matrix >= cfg.nb_honests] = -1
-                        tracker.record_drift(neighbor_disagreement(updated, neighbor_indices=neighbor_matrix.tolist()), consensus_drift(updated))
-                else:
-                    # Fixed mode
-                    for w in workers:
-                        neighbors = [*list(w.comm_graph.neighbors(w.worker_id)), w.worker_id]
-                        honest_nids = [i for i in neighbors if i < cfg.nb_honests]
-                        byz_nids = [i for i in neighbors if i >= cfg.nb_honests]
-                        w.num_selected_byz.append(len(byz_nids))
-                        h_weights = [honest_weights[i] for i in honest_nids]
-                        if cfg.adversary.attack == "dissensus":
-                            b_weights = [dec_byz_workers[i].pull({"target": w.worker_id, "honest_neighbors": honest_nids, "pivot_params": w.pull(None), "honest_local_params": h_weights}) for i in byz_nids]
-                        else:
-                            b_weights = [byz_workers_by_id[i].pull({"honest_weights": honest_weights, "step": current_step}) for i in byz_nids]
-                        w.aggregate(h_weights + b_weights)
-
-                    with torch.no_grad():
-                        updated = [w.pull(None) for w in workers]
-                        tracker.record_drift(neighbor_disagreement(updated, adjacency=adjacency_honest), consensus_drift(updated))
-
-                _raise_if_nonfinite_weights(workers, current_step, mode)
-
-        tracker.finalize(workers, mode)
-    if mode == "dynamic":
-        np.save(result_dir / "reward_algorithm.npy", np.array(algorithm_reward_history))
-        np.save(result_dir / "reward_oracle.npy", np.array(oracle_reward_history))
-        np.save(result_dir / "regret.npy", np.array(oracle_reward_history) - np.array(algorithm_reward_history))
-        np.save(result_dir / "reward_selected_min.npy", np.array(reward_min_history))
-        np.save(result_dir / "reward_selected_max.npy", np.array(reward_max_history))
-        np.save(result_dir / "selected_neighbors.npy", np.array(selected_neighbor_history, dtype=int))
-        np.save(result_dir / "oracle_neighbors.npy", np.array(oracle_neighbor_history, dtype=int))
-        np.save(result_dir / "sampler_kl_to_uniform.npy", np.array(sampler_kl_history))
-        np.save(result_dir / "sampler_min_probability.npy", np.array(sampler_min_prob_history))
-        np.save(result_dir / "sampler_max_probability.npy", np.array(sampler_max_prob_history))
-        sampler_probs_final = np.stack([_full_sampler_probability_vector(w, cfg.topology.nodes) for w in workers])
-        np.save(result_dir / "sampler_probabilities_final.npy", sampler_probs_final)
-
-
-def run_dynamic(cfg: BanditDLConfig, result_dir: pathlib.Path, seed: int, device: str) -> None:
-    _run_experiment(cfg, result_dir, seed, device, "dynamic")
-
-
-def run_fixed(cfg: BanditDLConfig, result_dir: pathlib.Path, seed: int, device: str) -> None:
-    _run_experiment(cfg, result_dir, seed, device, "fixed")
+                _step_dynamic(
+                    step,
+                    cfg,
+                    honest_workers,
+                    byz_by_id,
+                    h_weights,
+                    cum_arm_r,
+                    cum_alg_r,
+                    tracker,
+                )
+                _raise_if_nonfinite_weights(honest_workers, step)
+                if step % 10 == 0:
+                    tracker.save_snapshot()
+        tracker.finalize(honest_workers)
