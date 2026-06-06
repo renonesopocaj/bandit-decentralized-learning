@@ -8,9 +8,9 @@ from typing import Any
 class DatasetConfig:
     dataset: str = "mnist"
     model: str = "MnistNet"
-    mode: str | None = None
-    nb_writers_limit: int | None = None
     numb_labels: int = 10
+    provider: dict[str, Any] = field(default_factory=dict)
+    partitioner: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -61,6 +61,7 @@ class EvaluationConfig:
 
 @dataclass
 class HeterogeneityConfig:
+    _target_: str = "banditdl.data.partitioning.SyntheticPartitionStrategy"
     method: str = "dirichlet"
     clusters: int | None = None  # Number of clusters. Defaults to topology.nodes.
 
@@ -92,6 +93,19 @@ class BanditDLConfig:
     @property
     def resolved_reward_name(self) -> str:
         return str(self.sampler.get("reward", "parameter_distance"))
+
+    @property
+    def uses_natural_partition(self) -> bool:
+        target = str(self.dataset.partitioner.get("_target_", ""))
+        return target.endswith("NaturalOwnerPartitionStrategy")
+
+    @property
+    def partitioner_config(self) -> dict[str, Any]:
+        return self.dataset.partitioner or vars(self.heterogeneity)
+
+    @property
+    def total_nodes(self) -> int:
+        return self.topology.nodes
 
     @property
     def nb_honests(self) -> int:

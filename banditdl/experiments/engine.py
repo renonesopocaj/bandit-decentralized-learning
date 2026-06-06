@@ -9,6 +9,7 @@ from dataclasses import replace
 import numpy as np
 import numpy.lib.format
 import torch
+from hydra.utils import instantiate
 
 from banditdl.core.sampling import (
     SamplerContext,
@@ -18,10 +19,9 @@ from banditdl.core.sampling import (
 from banditdl.core.worker.byzantine import ByzantineWorker
 from banditdl.core.worker.config import WorkerConfig
 from banditdl.core.worker.dynamic import DynamicWorker
-from banditdl.data import dataset
+from banditdl.data import DatasetBuildConfig, build_dataset_bundle
 from banditdl.experiments.config_schema import BanditDLConfig
 from banditdl.utils.math_utils import consensus_drift, neighbor_disagreement
-from banditdl.utils.results import make_result_file, store_result
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +87,8 @@ def _raise_if_nonfinite_weights(honest_workers, current_step: int) -> None:
 class ResultTracker:
     """Consolidates metrics tracking, evaluation, and saving results."""
 
-    def __init__(self, cfg: BanditDLConfig, result_dir: pathlib.Path, test_loader=None):
-        self.cfg, self.result_dir, self.test_loader = cfg, result_dir, test_loader
+    def __init__(self, cfg: BanditDLConfig, result_dir: pathlib.Path, test_loader=None, test_loader_sub=None):
+        self.cfg, self.result_dir, self.test_loader, self.test_loader_sub = cfg, result_dir, test_loader, test_loader_sub
         self.result_dir.mkdir(parents=True, exist_ok=True)
         self.validation_steps = []
 
@@ -100,6 +100,7 @@ class ResultTracker:
         mmap_configs = {
             "local_accuracy.npy": (nb_evals, cfg.nb_honests),
             "local_loss.npy": (nb_evals, cfg.nb_honests),
+            "global_accuracy.npy": (nb_evals, cfg.nb_honests),  # Periodic subsampled eval
             "train_loss.npy": (nb_evals, cfg.nb_honests),
             "neighbor_disagreement.npy": (cfg.effective_rounds, cfg.nb_honests),
             "consensus_drift.npy": (cfg.effective_rounds, cfg.nb_honests),
@@ -155,11 +156,17 @@ class ResultTracker:
             self.mmaps["local_loss.npy"][eval_idx] = np.array(v_losses, dtype="float32")
             self.mmaps["train_loss.npy"][eval_idx] = np.array(t_losses, dtype="float32")
 
+            # Periodic Global Generalization (Subsampled)
+            if self.test_loader_sub:
+                g_accs = [w.compute_accuracy_on_loader(self.test_loader_sub) for w in honest_workers]
+                self.mmaps["global_accuracy.npy"][eval_idx] = np.array(g_accs, dtype="float32")
+                logger.info(f"Step {step} | Mean Local Acc: {sum(accs)/len(accs):.4f} | Mean Global Acc (sub): {sum(g_accs)/len(g_accs):.4f}")
+
             mean_acc, mean_v, mean_t = sum(accs) / len(accs), sum(v_losses) / len(v_losses), sum(t_losses) / len(t_losses)
             self.validation_steps.append(step)
 
             if eval_idx % 5 == 0:
-                for name in ["local_accuracy.npy", "local_loss.npy", "train_loss.npy"]:
+                for name in ["local_accuracy.npy", "local_loss.npy", "train_loss.npy", "global_accuracy.npy"]:
                     self.mmaps[name].flush()
 
         if _should_log_step(step, self.cfg.effective_rounds):
@@ -393,49 +400,31 @@ def run_experiment(
 ) -> None:
     _setup_seed(seed)
     _log_start(cfg, result_dir)
-    train_dict, local_test_dict, test_loader, dist_stats = (
-        dataset.make_train_validation_test_datasets(
-            cfg.dataset.dataset,
-            numb_labels=cfg.dataset.numb_labels,
-            alpha_dirichlet=cfg.heterogeneity.alpha,
-            honest_workers=cfg.nb_honests,
+    data = build_dataset_bundle(
+        instantiate(cfg.dataset.provider),
+        instantiate(cfg.partitioner_config),
+        DatasetBuildConfig(
+            nodes=cfg.nb_honests,
             train_batch=cfg.optimization.batch_size,
             test_batch=100,
             global_test_ratio=cfg.evaluation.global_test_ratio,
             local_test_ratio=cfg.evaluation.local_test_ratio,
-            split_seed=cfg.evaluation.split_seed,
-            partition_method=cfg.heterogeneity.method,
-            clusters=cfg.heterogeneity.clusters,
-            classes_per_group=cfg.heterogeneity.classes_per_group,
-            group_overlap=cfg.heterogeneity.group_overlap,
-            gamma_similarity=cfg.heterogeneity.gamma_similarity,
-            dataset_mode=cfg.dataset.mode,
-            nb_writers_limit=cfg.dataset.nb_writers_limit,
-        )
+            seed=cfg.evaluation.split_seed,
+        ),
     )
 
-    honest_workers = _init_workers(cfg, train_dict, local_test_dict, device)
+    honest_workers = _init_workers(cfg, data.train, data.local_test, device)
     bw_cfg = _build_worker_config(cfg, device)
     byz_workers = [
         ByzantineWorker(i, honest_workers[0].model_size, bw_cfg)
-        for i in range(cfg.nb_honests, cfg.topology.nodes)
+        for i in range(cfg.nb_honests, cfg.total_nodes)
     ]
     byz_by_id = {byz.worker_id: byz for byz in byz_workers}
 
-    with ResultTracker(cfg, result_dir, test_loader) as tracker:
+    with ResultTracker(cfg, result_dir, data.global_test, data.tracking_test) as tracker:
         tracker.save_audit(
             {
-                "partition": {
-                    "method": cfg.heterogeneity.method,
-                    "seed": cfg.evaluation.split_seed,
-                    "requested_clusters": cfg.heterogeneity.clusters,
-                    "resolved_clusters": cfg.resolved_clusters,
-                    "alpha": cfg.heterogeneity.alpha,
-                    "classes_per_group": cfg.heterogeneity.classes_per_group,
-                    "group_overlap": cfg.heterogeneity.group_overlap,
-                    "gamma_similarity": cfg.heterogeneity.gamma_similarity,
-                },
-                "distribution": dist_stats,
+                **data.audit,
                 "participants": {
                     "total": cfg.topology.nodes,
                     "honest": cfg.nb_honests,

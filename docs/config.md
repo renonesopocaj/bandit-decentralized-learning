@@ -57,8 +57,13 @@ hydra:
 
 Group: `conf/dataset/`
 
-- `dataset`: e.g. `mnist`, `cifar10`
+- `dataset`: `mnist`, `cifar10`, `femnist`, or `femnist_pool`
 - `model`: model constructor name
+- `provider`: Hydra target responsible for loading samples and metadata
+
+Use `dataset=femnist` for natural writer-per-node partitions. Use
+`dataset=femnist_pool` to apply the selected synthetic `heterogeneity` config
+to pooled FEMNIST samples.
 
 ### Topology
 
@@ -104,6 +109,8 @@ Important fields:
 ### Heterogeneity
 
 Group: `conf/heterogeneity/`
+
+Each profile is the Hydra-instantiated synthetic partition strategy.
 
 - `heterogeneity.alpha`: Dirichlet heterogeneity parameter
 - `heterogeneity.clusters`: number of clusters; `null` means one cluster per honest node

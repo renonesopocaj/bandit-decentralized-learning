@@ -3,6 +3,3 @@ model: cnn_femnist
 numb_labels: 62
 provider:
   _target_: banditdl.data.providers.FemnistProvider
-partitioner:
-  _target_: banditdl.data.partitioning.NaturalOwnerPartitionStrategy
-  writers_limit: null

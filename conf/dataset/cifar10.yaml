@@ -1,2 +1,6 @@
 dataset: cifar10
 model: cnn_cifar
+numb_labels: 10
+provider:
+  _target_: banditdl.data.providers.TorchvisionProvider
+  name: cifar10

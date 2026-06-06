@@ -1,2 +1,6 @@
 dataset: mnist
 model: cnn_mnist
+numb_labels: 10
+provider:
+  _target_: banditdl.data.providers.TorchvisionProvider
+  name: mnist
