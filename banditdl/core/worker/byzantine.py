@@ -1,9 +1,11 @@
 """Byzantine worker implementations for distributed training."""
 
 import torch
-from banditdl.core.robustness.attacks import ByzantineAttack
+
 from banditdl.core.robustness.aggregators import RobustAggregator
+from banditdl.core.robustness.attacks import ByzantineAttack
 from banditdl.core.worker.base import BaseWorker
+from banditdl.core.worker.config import WorkerConfig
 
 
 class ByzantineWorker(BaseWorker):
@@ -12,37 +14,27 @@ class ByzantineWorker(BaseWorker):
     def __init__(
         self,
         worker_id,
-        nb_workers,
-        nb_decl_byz,
-        nb_real_byz,
-        attack,
-        aggregator,
-        second_aggregator,
-        server_clip,
-        bucket_size,
         model_size,
-        mimic_learning_phase,
-        gradient_clip,
-        device,
+        config: WorkerConfig,
     ):
         super().__init__(worker_id=worker_id, is_byzantine=True)
         robust_aggregator = RobustAggregator(
-            aggregator,
-            second_aggregator,
-            server_clip,
-            nb_workers,
-            nb_decl_byz,
-            bucket_size,
+            config.aggregator,
+            config.pre_aggregator,
+            config.server_clip,
+            config.nb_workers,
+            config.nb_byz,
+            config.bucket_size,
             model_size,
-            device,
+            config.device,
         )
         self.byzantine_attack = ByzantineAttack(
-            attack,
-            nb_real_byz,
+            config.attack if config.attack else "SF",
+            config.nb_real_byz,
             model_size,
-            device,
-            mimic_learning_phase,
-            gradient_clip,
+            config.device,
+            config.mimic_learning_phase,
+            config.gradient_clip,
             robust_aggregator,
         )
 
@@ -73,12 +65,12 @@ class ByzantineWorker(BaseWorker):
 class DecByzantineWorker(BaseWorker):
     """Decentralized Byzantine participant for fixed-graph dissensus."""
 
-    def __init__(self, worker_id, nb_honest, network, device, epsilon=1):
+    def __init__(self, worker_id: int, nb_honest: int, config: WorkerConfig):
         super().__init__(worker_id=worker_id, is_byzantine=True)
         self.nb_honest = nb_honest
-        self.network = network
-        self.device = device
-        self.epsilon = epsilon
+        self.network = config.comm_graph
+        self.device = config.device
+        self.epsilon = config.epsilon
 
     def train(self) -> None:
         return None

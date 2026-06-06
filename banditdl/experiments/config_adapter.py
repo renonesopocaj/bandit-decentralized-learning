@@ -1,184 +1,138 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 from omegaconf import DictConfig, OmegaConf
 
+from banditdl.core.worker.config import WorkerConfig
+from banditdl.experiments.config_schema import BanditDLConfig
+
 
 @dataclass(frozen=True)
 class EngineRunConfig:
-    params: dict[str, Any]
+    config: BanditDLConfig
     run_mode: str
     run_name: str
     nb_neighbors: int
     byzantine_budget: int
 
+    def to_worker_config(self, device: str) -> WorkerConfig:
+        """Convert engine parameters to a structured WorkerConfig."""
+        c = self.config
+        is_dynamic = self.run_mode == "dynamic"
 
-def _get(section: DictConfig, *names: str, default=None):
-    for name in names:
-        if name in section:
-            return section.get(name)
-    return default
+        sampler_name = c.sampler.get("name", c.topology.neighbor_sampler) if c.sampler else c.topology.neighbor_sampler
 
-
-def _nodes(cfg: DictConfig) -> int:
-    nodes = OmegaConf.select(cfg, "topology.nodes")
-    if nodes is None:
-        nodes = OmegaConf.select(cfg, "nodes")
-    if nodes is None:
-        raise ValueError("Missing topology.nodes")
-    return int(nodes)
-
-
-def is_dynamic_topology(topology_cfg: DictConfig) -> bool:
-    has_sampling = "sampling" in topology_cfg
-    has_degree = "degree" in topology_cfg
-    if has_sampling == has_degree:
-        raise ValueError("Topology must define exactly one of 'sampling' or 'degree'")
-    return has_sampling
-
-
-def _neighbor_count(cfg: DictConfig, nodes: int, is_dynamic: bool) -> int:
-    if is_dynamic:
-        sampling = float(cfg.topology.sampling)
-        return max(1, min(nodes - 1, int(round((nodes - 1) * sampling))))
-    return int(cfg.topology.degree)
-
-
-def _sampler_name(cfg: DictConfig) -> str:
-    if "sampler" in cfg:
-        return str(cfg.sampler.name)
-    return str(cfg.topology.neighbor_sampler)
-
-
-def _sampler_params(cfg: DictConfig) -> dict[str, Any]:
-    if "sampler" not in cfg or "params" not in cfg.sampler:
-        return {}
-    params = OmegaConf.to_container(cfg.sampler.params, resolve=True)
-    if params is None:
-        return {}
-    if not isinstance(params, dict):
-        raise ValueError("sampler.params must be a mapping")
-    return params
-
-
-def _sampler_reward(cfg: DictConfig) -> str:
-    if "sampler" in cfg:
-        return str(cfg.sampler.get("reward", "parameter_distance"))
-    return str(cfg.topology.get("bandit_reward", "parameter_distance"))
-
-
-def _run_name(cfg: DictConfig, byzantine_budget: int, nb_neighbors: int) -> str:
-    nodes = _nodes(cfg)
-    is_dynamic = is_dynamic_topology(cfg.topology)
-    sampler = _sampler_name(cfg)
-    if is_dynamic:
-        topology_token = f"-sampling_{cfg.topology.sampling}"
-    else:
-        topology_token = f"-degree_{nb_neighbors}"
-    base = (
-        f"{cfg.dataset.dataset}-n_{nodes}"
-        f"-model_{cfg.dataset.model}"
-        f"-attack_{cfg.adversary.attack}"
-        f"-agg_{cfg.aggregator.aggregator}"
-        f"{topology_token}"
-        f"-sampler_{sampler}"
-        f"-f_{cfg.adversary.byzcount}"
-        f"-alpha_{cfg.heterogeneity.alpha}"
-        f"-byz_budget_{byzantine_budget}"
-        f"-nb-local_{cfg.optimization.nb_local_steps}"
-    )
-    if sampler != "uniform":
-        sampler_params = _sampler_params(cfg)
-        param_token = "_".join(
-            f"{key}_{value}" for key, value in sampler_params.items()
+        return WorkerConfig(
+            model=c.dataset.model,
+            learning_rate=c.optimization.learning_rate,
+            learning_rate_decay=c.optimization.learning_rate_decay,
+            learning_rate_decay_delta=c.optimization.learning_rate_decay_delta,
+            weight_decay=c.optimization.weight_decay,
+            loss=c.optimization.loss,
+            momentum=c.optimization.momentum_worker,
+            device=device,
+            nb_local_steps=c.optimization.nb_local_steps,
+            nb_workers=c.topology.nodes,
+            nb_byz=c.adversary.byzcount,
+            nb_real_byz=c.adversary.byzcount,
+            b_hat=self.byzantine_budget,
+            attack=c.adversary.attack,
+            rag=c.aggregator.rag or is_dynamic,
+            numb_labels=c.dataset.numb_labels,
+            labelflipping=c.adversary.attack == "LF",
+            gradient_clip=None,
+            server_clip=c.aggregator.server_clip,
+            bucket_size=c.aggregator.bucket_size,
+            aggregator=c.aggregator.aggregator,
+            pre_aggregator=c.aggregator.pre_aggregator,
+            nb_neighbors=self.nb_neighbors,
+            sampling_ratio=c.topology.sampling,
+            neighbor_sampler=None,
+            reward_strategy=None,
+            mimic_learning_phase=c.adversary.mimic_learning_phase,
+            method=c.topology.method or sampler_name,
+            comm_graph=None,
+            dissensus=c.adversary.attack == "dissensus",
+            epsilon=1.0,
         )
-        if param_token:
-            base += f"-{param_token}"
-    return base
 
 
 def build_engine_config(cfg: DictConfig) -> EngineRunConfig:
-    nodes = _nodes(cfg)
-    is_dynamic = is_dynamic_topology(cfg.topology)
-    nb_neighbors = _neighbor_count(cfg, nodes, is_dynamic)
-    sampler = _sampler_name(cfg)
-    rounds = cfg.optimization.get("rounds", cfg.optimization.get("nb_steps"))
-    if rounds is None:
-        raise ValueError("Missing optimization.rounds")
+    # Use the user's preferred pattern to get a typed object
+    merged = OmegaConf.merge(OmegaConf.structured(BanditDLConfig), cfg)
+    OmegaConf.resolve(merged)
+    obj: BanditDLConfig = OmegaConf.to_object(merged)
 
-    params: dict[str, Any] = {
-        "dataset": cfg.dataset.dataset,
-        "model": cfg.dataset.model,
-        "nb-workers": nodes,
-        "dirichlet-alpha": float(cfg.heterogeneity.alpha),
-        "nb-decl-byz": int(cfg.adversary.byzcount),
-        "nb-real-byz": int(cfg.adversary.byzcount),
-        "nb-neighbors": nb_neighbors,
-        "nb-local-steps": int(cfg.optimization.nb_local_steps),
-        "neighbor-sampler": sampler,
-        "sampler-params": _sampler_params(cfg),
-        "sampler-reward": _sampler_reward(cfg),
-        "batch-size": int(cfg.optimization.batch_size),
-        "loss": cfg.optimization.loss,
-        "weight-decay": float(cfg.optimization.weight_decay),
-        "momentum-worker": float(cfg.optimization.momentum_worker),
-        "rounds": int(rounds),
-        "aggregator": cfg.aggregator.aggregator,
-        "pre-aggregator": _get(cfg.aggregator, "pre-aggregator", "pre_aggregator"),
-        "rag": bool(cfg.aggregator.rag),
-        "numb-labels": int(cfg.heterogeneity.numb_labels),
-        "evaluation-delta": int(cfg.evaluation.evaluation_delta),
-    }
-
-    learning_rate = cfg.optimization.get("learning_rate")
-    if learning_rate is not None:
-        params["learning-rate"] = float(learning_rate)
-    learning_rate_decay = cfg.optimization.get("learning_rate_decay")
-    if learning_rate_decay is not None:
-        params["learning-rate-decay"] = int(learning_rate_decay)
-    learning_rate_decay_delta = _get(
-        cfg.optimization, "learning_rate_decay_delta", "learning_rate_decay-delta"
+    is_dynamic = obj.topology.sampling is not None
+    nb_neighbors = (
+        max(1, min(obj.topology.nodes - 1, round((obj.topology.nodes - 1) * obj.topology.sampling)))
+        if is_dynamic
+        else obj.topology.degree
     )
-    if learning_rate_decay_delta is not None:
-        params["learning-rate-decay-delta"] = int(learning_rate_decay_delta)
 
-    attack = cfg.adversary.get("attack")
-    if attack is not None:
-        params["attack"] = attack
-    mimic_learning_phase = _get(
-        cfg.adversary, "mimic_learning_phase", "mimic-learning-phase"
+    byz_budget = (
+        obj.adversary.byzantine_budget
+        if obj.adversary.byzantine_budget is not None
+        else obj.adversary.byzcount
     )
-    if mimic_learning_phase is not None:
-        params["mimic-learning-phase"] = int(mimic_learning_phase)
-
-    byz_budget_raw = cfg.adversary.get("byzantine_budget")
-    byzantine_budget = int(
-        cfg.adversary.byzcount if byz_budget_raw is None else byz_budget_raw
-    )
-    params["b-hat"] = byzantine_budget
-
-    if is_dynamic:
-        params["rag"] = True
-        params["sampling-ratio"] = float(cfg.topology.sampling)
-    else:
-        params["method"] = cfg.topology.get("method", sampler)
 
     return EngineRunConfig(
-        params=params,
+        config=obj,
         run_mode="dynamic" if is_dynamic else "fixed",
-        run_name=_run_name(cfg, byzantine_budget, nb_neighbors),
+        run_name=_run_name(obj, byz_budget, nb_neighbors),
         nb_neighbors=nb_neighbors,
-        byzantine_budget=byzantine_budget,
+        byzantine_budget=byz_budget,
     )
+
+
+def _run_name(c: BanditDLConfig, byz_budget: int, nb_neighbors: int) -> str:
+    sampler = c.sampler.get("name", c.topology.neighbor_sampler) if c.sampler else c.topology.neighbor_sampler
+    topology_token = f"-sampling_{c.topology.sampling}" if c.topology.sampling is not None else f"-degree_{nb_neighbors}"
+
+    return (
+        f"{c.dataset.dataset}-n_{c.topology.nodes}"
+        f"-model_{c.dataset.model}"
+        f"-attack_{c.adversary.attack}"
+        f"-agg_{c.aggregator.aggregator}"
+        f"{topology_token}"
+        f"-sampler_{sampler}"
+        f"-f_{c.adversary.byzcount}"
+        f"-{_partition_token(c)}"
+        f"-byz_budget_{byz_budget}"
+        f"-nb-local_{c.optimization.nb_local_steps}"
+    )
+
+
+def _partition_token(c: BanditDLConfig) -> str:
+    if c.dataset.mode == "writer_per_node":
+        if c.dataset.dataset != "femnist":
+            raise ValueError("dataset.mode='writer_per_node' is only valid for FEMNIST")
+        cap = c.dataset.nb_writers_limit
+        return "femnist_writers" if cap is None else f"femnist_writers_cap_{cap}"
+
+    if c.heterogeneity.method == "dirichlet":
+        return f"alpha_{c.heterogeneity.alpha}"
+
+    if c.heterogeneity.method == "pathological":
+        style = c.heterogeneity.partition
+        if style is None:
+            raise ValueError("heterogeneity.partition is required when method=pathological")
+        if style == "classes_per_worker":
+            return f"pathological_c_{c.heterogeneity.classes_per_worker}"
+        if style == "shards_per_worker":
+            nb_shards = c.heterogeneity.nb_shards or "auto"
+            return f"pathological_s_{c.heterogeneity.shards_per_worker}_n_{nb_shards}"
+        if style == "grouped_classes":
+            base = f"pathological_g_{c.heterogeneity.nb_groups}x{c.heterogeneity.classes_per_group}"
+            ov = c.heterogeneity.group_overlap
+            return f"{base}_ov_{ov}" if ov else base
+    return f"hetero_{c.heterogeneity.method}"
 
 
 def resolve_device(cfg: DictConfig) -> str:
     configured = str(cfg.device)
     if configured and configured != "auto":
         return configured
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
+    return "cuda" if torch.cuda.is_available() else "cpu"

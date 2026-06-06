@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Protocol
 
 import numpy as np
 
@@ -20,6 +21,7 @@ class MetricKey(StrEnum):
     NORMALIZED_REGRET = "normalized_regret"
     NEIGHBOR_DISAGREEMENT = "neighbor_disagreement"
     CONSENSUS_DRIFT = "consensus_drift"
+    GRADIENT_NORMS = "gradient_norms"
     SAMPLER_KL_TO_UNIFORM = "sampler_kl_to_uniform"
     SAMPLER_MIN_PROBABILITY = "sampler_min_probability"
     SAMPLER_MAX_PROBABILITY = "sampler_max_probability"
@@ -58,6 +60,7 @@ HIGHER_IS_WORSE = {
     MetricKey.NORMALIZED_REGRET,
     MetricKey.NEIGHBOR_DISAGREEMENT,
     MetricKey.CONSENSUS_DRIFT,
+    MetricKey.GRADIENT_NORMS,
     MetricKey.VALIDATION_LOSSES,
     MetricKey.TRAIN_LOSSES,
     MetricKey.VALIDATION_LOSS,
@@ -77,11 +80,13 @@ class Transform(Protocol):
 
 class TimeAverage:
     def __call__(self, values: np.ndarray) -> np.ndarray:
-        local_time = np.arange(1, len(values) + 1, dtype=float)
-        shape = (len(values),) + (1,) * (values.ndim - 1)
+        time_axis = _time_axis(values)
+        local_time = np.arange(1, values.shape[time_axis] + 1, dtype=float)
+        shape = [1] * values.ndim
+        shape[time_axis] = values.shape[time_axis]
         return np.divide(
             values,
-            local_time.reshape(shape),
+            local_time.reshape(tuple(shape)),
             out=np.full_like(values, np.nan, dtype=float),
             where=np.isfinite(values),
         )
@@ -93,10 +98,31 @@ class Aggregation:
     fn: Callable[[np.ndarray], np.ndarray]
 
 
-mean = Aggregation("average", lambda values: np.nanmean(values, axis=1))
-median = Aggregation("median", lambda values: np.nanmedian(values, axis=1))
-max_ = Aggregation("max", lambda values: np.nanmax(values, axis=1))
-min_ = Aggregation("min", lambda values: np.nanmin(values, axis=1))
+def _has_seed_axis(values: np.ndarray) -> bool:
+    return values.ndim >= 3
+
+
+def _time_axis(values: np.ndarray) -> int:
+    return 1 if _has_seed_axis(values) else 0
+
+
+def _node_axis(values: np.ndarray) -> int:
+    return 2 if _has_seed_axis(values) else 1
+
+
+def _seed_outer_node_reduce(values: np.ndarray, reducer: Callable) -> np.ndarray:
+    if values.ndim < 2:
+        return values
+    per_seed_or_curve = reducer(values, axis=_node_axis(values))
+    if _has_seed_axis(values):
+        return np.nanmean(per_seed_or_curve, axis=0)
+    return per_seed_or_curve
+
+
+mean = Aggregation("average", lambda values: _seed_outer_node_reduce(values, np.nanmean))
+median = Aggregation("median", lambda values: _seed_outer_node_reduce(values, np.nanmedian))
+max_ = Aggregation("max", lambda values: _seed_outer_node_reduce(values, np.nanmax))
+min_ = Aggregation("min", lambda values: _seed_outer_node_reduce(values, np.nanmin))
 
 
 def resolve_metric(metric: MetricKey | str) -> MetricKey:
@@ -109,14 +135,33 @@ def resolve_metric(metric: MetricKey | str) -> MetricKey:
 def read_eval(path: Path) -> tuple[np.ndarray, np.ndarray]:
     steps: list[float] = []
     values: list[float] = []
+    skipped = 0
     with path.open() as fd:
         for line in fd:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            step, value, *_ = line.split()
-            steps.append(float(step))
-            values.append(float(value))
+            tokens = line.split()
+            if len(tokens) < 2:
+                # Surface but tolerate corrupted lines (typically interleaved writes
+                # when multiple jobs collide on the same hydra run dir).
+                skipped += 1
+                continue
+            try:
+                step = float(tokens[0])
+                value = float(tokens[1])
+            except ValueError:
+                skipped += 1
+                continue
+            steps.append(step)
+            values.append(value)
+    if skipped:
+        import warnings
+        warnings.warn(
+            f"{path}: skipped {skipped} malformed line(s); the file may be from a "
+            "collided run-dir (check hydra.run.dir uniqueness).",
+            stacklevel=2,
+        )
     return np.asarray(steps), np.asarray(values)
 
 
@@ -125,17 +170,21 @@ def interpolate_to_steps(
     source_steps: np.ndarray,
     target_steps: np.ndarray,
 ) -> np.ndarray:
-    if source_steps.shape[0] != values.shape[0]:
+    time_axis = _time_axis(values)
+    if source_steps.shape[0] != values.shape[time_axis]:
         return values
     if source_steps.shape[0] == target_steps.shape[0] and np.allclose(source_steps, target_steps):
         return values
     if source_steps.shape[0] == 1:
-        return np.repeat(values, repeats=target_steps.shape[0], axis=0)
+        return np.repeat(values, repeats=target_steps.shape[0], axis=time_axis)
 
-    out = np.zeros((target_steps.shape[0], values.shape[1]), dtype=float)
-    for worker_id in range(values.shape[1]):
-        out[:, worker_id] = np.interp(target_steps, source_steps, values[:, worker_id])
-    return out
+    moved = np.moveaxis(values, time_axis, 0)
+    flat = moved.reshape(moved.shape[0], -1)
+    interpolated = np.zeros((target_steps.shape[0], flat.shape[1]), dtype=float)
+    for series_id in range(flat.shape[1]):
+        interpolated[:, series_id] = np.interp(target_steps, source_steps, flat[:, series_id])
+    reshaped = interpolated.reshape((target_steps.shape[0], *moved.shape[1:]))
+    return np.moveaxis(reshaped, 0, time_axis)
 
 
 class MetricLoader:
@@ -148,7 +197,7 @@ class MetricLoader:
             return self._load_text(key)
 
         values = self.load_values(key)
-        x = np.arange(values.shape[0])
+        x = np.arange(values.shape[_time_axis(values)])
         if interpolate_eval and key == MetricKey.VALIDATION_ACCURACIES:
             source_steps = self._load_text(MetricKey.VALIDATION).x
             x = self.full_round_axis()
@@ -163,12 +212,41 @@ class MetricLoader:
             return self._load_text(key).values
 
         for filename in NPY_CANDIDATES.get(key, (f"{key.value}.npy",)):
-            path = self.run_dir / filename
+            for path in self._npy_paths(filename):
+                if path.exists():
+                    values = np.load(path)
+                    if values.size == 0:
+                        raise ValueError(f"{path} is empty")
+                    return values
+        raise FileNotFoundError(self.run_dir / f"{key.value}.npy")
+
+    def load_seed_values(self, metric: MetricKey | str) -> np.ndarray:
+        """Load metric values with seed as axis 0.
+
+        Args:
+            metric: MetricKey | str
+                Metric key or alias to load.
+            return: np.ndarray
+                Values with an explicit leading seed axis.
+        """
+        key = resolve_metric(metric)
+        if key == MetricKey.NORMALIZED_REGRET:
+            return TimeAverage()(self.load_seed_values(MetricKey.REGRET))
+        if key in TEXT_CANDIDATES:
+            return self._load_seed_text(key)
+
+        for filename in NPY_CANDIDATES.get(key, (f"{key.value}.npy",)):
+            by_seed_path, path = self._npy_paths(filename)
+            if by_seed_path.exists():
+                values = np.load(by_seed_path)
+                if values.size == 0:
+                    raise ValueError(f"{by_seed_path} is empty")
+                return values
             if path.exists():
                 values = np.load(path)
                 if values.size == 0:
                     raise ValueError(f"{path} is empty")
-                return values
+                return values[np.newaxis, ...]
         raise FileNotFoundError(self.run_dir / f"{key.value}.npy")
 
     def full_round_axis(self) -> np.ndarray:
@@ -177,11 +255,15 @@ class MetricLoader:
             MetricKey.CONSENSUS_DRIFT,
             MetricKey.REWARD_ALGORITHM,
             MetricKey.REGRET,
+            MetricKey.GRADIENT_NORMS,
             MetricKey.SAMPLER_KL_TO_UNIFORM,
         ):
             path = self.run_dir / f"{key.value}.npy"
             if path.exists():
                 return np.arange(np.load(path).shape[0])
+            by_seed_path = self.run_dir / f"{key.value}_by_seed.npy"
+            if by_seed_path.exists():
+                return np.arange(np.load(by_seed_path).shape[1])
         validation = self._load_text(MetricKey.VALIDATION)
         return np.arange(int(np.max(validation.x)) + 1)
 
@@ -195,13 +277,67 @@ class MetricLoader:
                 return MetricData(x=x, values=values)
         raise FileNotFoundError(self.run_dir / TEXT_CANDIDATES[metric][0])
 
+    def _load_seed_text(self, metric: MetricKey) -> np.ndarray:
+        for filename in TEXT_CANDIDATES[metric]:
+            by_seed_path = self.run_dir / f"{filename}_by_seed.npy"
+            if by_seed_path.exists():
+                values = np.load(by_seed_path)
+                if values.size == 0:
+                    raise ValueError(f"{by_seed_path} is empty")
+                return values
+            path = self.run_dir / filename
+            if path.exists():
+                _, values = read_eval(path)
+                if values.size == 0:
+                    raise ValueError(f"{path} is empty")
+                return values[np.newaxis, ...]
+        raise FileNotFoundError(self.run_dir / TEXT_CANDIDATES[metric][0])
+
+    def _npy_paths(self, filename: str) -> tuple[Path, Path]:
+        stem = Path(filename).stem
+        return self.run_dir / f"{stem}_by_seed.npy", self.run_dir / filename
+
 
 def scalar_reduce(metric: MetricKey | str, values: np.ndarray, direction: str) -> float:
+    return scalar_reduce_seed_outer(metric, values[np.newaxis, ...], direction)
+
+
+def scalar_reduce_seed_outer(metric: MetricKey | str, values: np.ndarray, direction: str) -> float:
+    """Reduce seed-stacked metric values with seed averaging as the last step.
+
+    Args:
+        metric: MetricKey | str
+            Metric key used to decide whether larger values are worse.
+        values: np.ndarray
+            Metric values with seed as axis 0 and all inner axes belonging to a
+            single run.
+        direction: str
+            Reduction direction, either `avg`, `worse`, or `best`.
+        return: float
+            Mean across seeds of the per-seed scalar reduction.
+    """
     key = resolve_metric(metric)
+    values = np.asarray(values, dtype=float)
+    if values.ndim == 0:
+        values = values.reshape(1)
+    inner_axes = tuple(range(1, values.ndim))
     if direction == "avg":
-        return float(np.nanmean(values))
+        per_seed = values if not inner_axes else np.nanmean(values, axis=inner_axes)
+        return float(np.nanmean(per_seed))
     if direction == "worse":
-        if key in HIGHER_IS_WORSE:
-            return float(np.nanmax(values))
-        return float(np.nanmin(values))
+        if not inner_axes:
+            per_seed = values
+        elif key in HIGHER_IS_WORSE:
+            per_seed = np.nanmax(values, axis=inner_axes)
+        else:
+            per_seed = np.nanmin(values, axis=inner_axes)
+        return float(np.nanmean(per_seed))
+    if direction == "best":
+        if not inner_axes:
+            per_seed = values
+        elif key in HIGHER_IS_WORSE:
+            per_seed = np.nanmin(values, axis=inner_axes)
+        else:
+            per_seed = np.nanmax(values, axis=inner_axes)
+        return float(np.nanmean(per_seed))
     raise ValueError(f"Unsupported direction: {direction}")

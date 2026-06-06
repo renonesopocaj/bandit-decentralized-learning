@@ -23,10 +23,15 @@ uv run -m banditdl
 Example overrides:
 
 ```bash
-uv run -m banditdl dataset=mnist topology=dynamic sampler=uniform topology.nodes=100 topology.sampling=0.05 seed=0
+uv run -m banditdl dataset=mnist topology=dynamic sampler=uniform topology.nodes=100 topology.sampling=0.05 seed=0 num_seeds=3
 ```
 
-Runs print lightweight progress to stdout: start metadata, result directory, periodic decentralized-learning rounds, evaluation accuracy when available, and completion.
+Each configured trial runs `num_seeds` consecutive seeds: `seed`, `seed + 1`,
+and so on. Public artifacts under `results/` are seed-averaged; raw per-seed
+artifacts are kept under `results/seeds/seed_<value>/results/`. Runs print
+lightweight progress to stdout: start metadata, result directory, periodic
+decentralized-learning rounds, evaluation accuracy when available, and
+completion.
 
 ## Local Hydra Override
 
@@ -42,6 +47,7 @@ defaults:
   - override /adversary: none
 
 seed: 0
+num_seeds: 3
 device: mps
 
 hydra:
@@ -51,13 +57,16 @@ hydra:
     dir: .hydra_multirun_override/${now:%Y-%m-%d}/${now:%H-%M-%S}
 ```
 
+Detailed config documentation lives in [docs/config.md](docs/config.md).
+Sweep-specific documentation lives in [docs/sweeps.md](docs/sweeps.md).
+
 ## Run Sweeps (Hydra Multirun)
 
 Hydra does orchestration. The custom in-repo scheduler is no longer the main path.
 
 ## Run Sweeps (Optuna)
 
-Launch categorical grid sweeps with Hydra output folders:
+Launch Optuna sweeps with Hydra output folders:
 
 ```bash
 uv run python -m banditdl.experiments.sweep
@@ -66,44 +75,61 @@ uv run python -m banditdl.experiments.sweep
 Defaults (`conf/sweep.yaml`) compose `conf/config.yaml` plus `conf/optuna/sanitysweep.yaml`.
 
 Behavior:
-- Enumerates every valid Cartesian combination of **categorical** `optuna.search_space` entries (respecting optional `when:` guards).
-- Queues each combo via Optuna `enqueue_trial`, runs one training job per trial.
-- Writes trial artifacts under `<hydra_run>/trials/<param_tokens>/results/` (numpy arrays mirror standard runs).
-- Tracks validation accuracy from `results/validation`, selects the best trial, then re-runs it once with test evaluation under `<hydra_run>/best_trial_test_eval/results`.
-- After all trials finish, renders default sweep plots under `<hydra_run>/sweep_artifacts/`.
+- Exhaustively enumerates valid Cartesian combinations when all `optuna.search_space` entries are categorical.
+- Uses Optuna sampling and `optuna.n_trials` when the search space contains continuous `float` / `int` entries.
+- Respects optional `when:` guards for conditional parameters such as sampler-specific hyperparameters.
+- Runs one Optuna trial per non-seed configuration and repeats that configuration `num_seeds` times.
+- Writes seed-averaged trial artifacts under `<hydra_run>/trials/<param_tokens>/results/` and raw seed artifacts under that directory's `seeds/` subfolder.
+- Persists the Optuna study to `<hydra_run>/optuna.db` for offline sweep plotting.
+- Tracks mean validation accuracy across seeds, selects the best trial, then re-runs all of its seeds with test evaluation under `<hydra_run>/best_trial_test_eval/results`.
+- If `plot.enabled: true`, renders configured sweep plots under `<hydra_run>/sweep_artifacts/`.
 
-Sweep plotting is intentionally defined in Python, not YAML. The default sweep plot set lives in `banditdl/utils/plot_sweep_base.py` and currently generates:
+Sweep plotting is controlled by `conf/sweep.yaml`:
 
-| Mode | Meaning |
-| --- | --- |
-| `per_parameter` | WAY 2 style curves (per-axis grids described in `banditdl/utils/plot_sweep_perparam.py`). |
-| `all_together` | WAY 1 style overlays (`banditdl/utils/plot_sweep_alltogether.py`). |
-| `heatmap` | Pairwise heatmaps (`banditdl/utils/plot_sweep_heatmap.py`). |
-
-Default sweep reductions over timesteps and nodes:
-- `avg`: arithmetic mean over all timesteps and all nodes.
-- `worse`: worst observed value across timesteps and nodes; uses max for
-  metrics where higher is worse (`regret`, `normalized_regret`,
-  `neighbor_disagreement`, `consensus_drift`, `validation_losses`,
-  `train_losses`) and min otherwise (accuracies, rewards).
-
-Plot outputs are written under:
-
-```text
-<hydra_run>/sweep_artifacts/
-  per_parameter/direction=avg/...
-  per_parameter/direction=worse/...
-  all_together/direction=avg/...
-  all_together/direction=worse/...
-  heatmap/direction=avg/...
-  heatmap/direction=worse/...
+```yaml
+plot:
+  enabled: true
+  directions: [avg, worse]
+  heatmaps:
+    - x: heterogeneity.alpha
+      y: topology.sampling
+      group_by:
+        - sampler.name
+        - [sampler.name, sampler.params.epsilon]
+      aggregate_by: avg
+      render: [heatmap]
+      exclude_metrics: []
+  per_parameter:
+    enabled: false
+    exclude_metrics: []
 ```
 
-If a particular `(metric, mode, direction, fixed-axes)` combination has no
-plottable points (missing arrays or no matching trials), the plot is **skipped
-with a warning** instead of writing a blank PNG.
+Plotting rules:
+- Heatmaps are explicit; the plotter no longer generates every possible axis pair.
+- All known scalar metrics are plotted by default when present in result folders.
+- `exclude_metrics` removes metrics for a specific plot family/spec.
+- `direction` reduces a metric over timesteps/nodes: `avg` or `worse`.
+- `aggregate_by` reduces extra swept dimensions not used by `x`, `y`, or the active `group_by` slice: `avg`, `min`, or `max`.
+- `group_by` creates slices. A string creates one slice per value; a list creates one slice per value combination.
+- Heatmap color scales are shared across slices for the same heatmap spec,
+  metric, and direction.
+- `render` defaults to `[heatmap]`; add `heatmap3d` for experimental static
+  3D surfaces under `sweep_artifacts/heatmap3d/`.
+- `per_parameter` remains available but is disabled by default.
 
-To change sweep plots, edit the Python defaults or run a separate plotting script after the sweep. Experiment parameters and Optuna search spaces remain Hydra-controlled.
+Offline plotting can regenerate sweep plots without rerunning training:
+
+```bash
+uv run python scripts/plot_sweep.py .hydra_runs/<date>/<time>
+```
+
+Use a custom output directory if desired:
+
+```bash
+uv run python scripts/plot_sweep.py .hydra_runs/<date>/<time> --output-dir plots/my_sweep
+```
+
+For larger sweeps:
 
 ```bash
 uv run python -m banditdl.experiments.sweep optuna=sweep
@@ -120,7 +146,8 @@ uv run -m banditdl -m \
   dataset=mnist \
   topology=dynamic \
   sampler=uniform,bandit \
-  seed=0,1 \
+  seed=0 \
+  num_seeds=3 \
   topology.nodes=50,100 \
   topology.sampling=0.03,0.05 \
   sampler.params.epsilon=0.1,0.3 \
@@ -167,7 +194,8 @@ uv run -m banditdl --cfg job
 - `heterogeneity`: data heterogeneity config group.
 - `optimization`: local optimizer/training schedule config group.
 - `evaluation`: evaluation cadence config group.
-- `seed`: random seed. Use comma-separated values under `-m` for sweeps.
+- `seed`: base random seed for one configured trial.
+- `num_seeds`: number of consecutive seeds to run for each configured trial. Metrics and plots aggregate seed results as the outermost reduction.
 - `device`: `auto`, `cpu`, or a torch device string such as `cuda`.
 
 ### Dataset Config
@@ -247,10 +275,13 @@ uv run -m banditdl -m \
   topology.nodes=50,100 \
   topology.sampling=0.03,0.05 \
   adversary=none \
-  seed=0,1,2
+  seed=0 \
+  num_seeds=3
 ```
 
 Hydra takes the Cartesian product of comma-separated override values.
+Sweep `seed` only when you want separate base-seed trials; use `num_seeds` for
+seed averaging within each trial.
 
 ## How To Create A New Experiment
 
@@ -518,6 +549,7 @@ Dynamic runs also save hindsight diagnostics for every sampler, including unifor
 - `regret.npy`: `reward_oracle - reward_algorithm`.
 - time-averaged regret is derived from `regret.npy` when plotting.
 - `reward_selected_min.npy`: per-round, per-node minimum reward among selected neighbors.
+- `gradient_norms.npy`: per-round, per-node norm of the applied local gradient update; `plots/gradient_norm_loglog.png` shows average, worst, and best curves on log-log axes.
 - `reward_selected_max.npy`: per-round, per-node maximum reward among selected neighbors.
 - `selected_neighbors.npy`: sampled neighbors per round and worker.
 - `oracle_neighbors.npy`: best fixed hindsight neighbors per round and worker.

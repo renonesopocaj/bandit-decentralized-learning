@@ -11,10 +11,13 @@ defaults:
   - override
 
 seed: 123
+num_seeds: 1
 device: cpu
 
 hydra:
   run:
-    dir: .hydra_runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    # SLURM_JOB_ID suffix prevents collisions when many sweep jobs start within the same second.
+    # Local (non-slurm) runs get `_local` and still order chronologically by HH-MM-SS.
+    dir: .hydra_runs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${oc.env:SLURM_JOB_ID,local}
   sweep:
-    dir: .hydra_multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: .hydra_multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}_${oc.env:SLURM_JOB_ID,local}

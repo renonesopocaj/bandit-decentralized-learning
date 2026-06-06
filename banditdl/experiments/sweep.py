@@ -3,20 +3,28 @@ from __future__ import annotations
 from pathlib import Path
 
 import hydra
+import numpy as np
 import optuna
 from hydra.core.hydra_config import HydraConfig
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
+from banditdl.experiments.config_schema import BanditDLConfig
 from banditdl.experiments.config_adapter import build_engine_config, resolve_device
 from banditdl.experiments.engine import run_dynamic, run_fixed
 from banditdl.utils.plot_sweep_base import (
+    STUDY_NAME,
+    _choices_from_spec,
+    _conditions_met,
+    _normalize_search_space,
+    _strip_meta,
+    _when_clause,
     build_axis_metadata,
     enumerate_valid_param_dicts,
-    normalize_directions,
-    normalize_plot_modes,
-    plot_sweep,
+    optuna_storage_url,
+    plot_sweep_from_cfg,
     trial_folder_name,
 )
+from banditdl.utils.seed_averaging import run_seed_averaged, seed_result_dir
 
 
 def _read_metric_file_max(metric_file: Path) -> float:
@@ -24,16 +32,37 @@ def _read_metric_file_max(metric_file: Path) -> float:
         raise FileNotFoundError(f"Missing metric file: {metric_file}")
 
     metric_values = []
-    for line in metric_file.read_text().splitlines():
+    for i, line in enumerate(metric_file.read_text().splitlines()):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         fields = stripped.split("\t")
-        if len(fields) >= 2:
-            metric_values.append(float(fields[1]))
+        try:
+            if len(fields) >= 2:
+                metric_values.append(float(fields[1]))
+            else:
+                print(f"Warning: Malformed line {i+1} in {metric_file} (too few fields)")
+        except ValueError:
+            print(f"Warning: Could not parse metric value on line {i+1} in {metric_file}")
+
     if not metric_values:
-        raise ValueError(f"No metric values found in: {metric_file}")
+        raise ValueError(f"No valid metric values found in: {metric_file}")
     return max(metric_values)
+
+
+def _read_seed_metric_file_max(result_dir: Path, seeds: list[int], metric_name: str) -> tuple[float, list[float]]:
+    seed_values = [
+        _read_metric_file_max(seed_result_dir(result_dir, seed) / metric_name)
+        for seed in seeds
+    ]
+    return float(np.mean(seed_values)), seed_values
+
+
+def _copy_dict_config(cfg: DictConfig) -> DictConfig:
+    copied = OmegaConf.create(OmegaConf.to_container(cfg, resolve=False))
+    if not isinstance(copied, DictConfig):
+        raise TypeError("Expected a DictConfig copy")
+    return copied
 
 
 def _resolved_trial_params(trial) -> dict:
@@ -45,71 +74,161 @@ def _resolved_trial_params(trial) -> dict:
     return {}
 
 
-def _objective(trial, base_cfg, trials_root: Path, axis_lookup: dict, combos: list) -> float:
+def _apply_trial_params(trial_cfg: DictConfig, trial_params: dict) -> None:
+    for path, value in trial_params.items():
+        OmegaConf.update(trial_cfg, path, value, merge=False, force_add=True)
+
+
+def _objective_from_params(
+    trial,
+    base_cfg: DictConfig,
+    output_root: Path,
+    axis_lookup: dict,
+    trial_params: dict,
+) -> float:
+    trial_cfg = _copy_dict_config(base_cfg)
+    _apply_trial_params(trial_cfg, trial_params)
+
+    # Convert to structured config
+    merged = OmegaConf.merge(OmegaConf.structured(BanditDLConfig), trial_cfg)
+    OmegaConf.resolve(merged)
+    config: BanditDLConfig = OmegaConf.to_object(merged)
+
+    trials_root = output_root / "trials"
+    folder_name = trial_folder_name(trial_params, axis_lookup)
+    trial_result_dir = trials_root / folder_name / "results"
+    trial_result_dir.mkdir(parents=True, exist_ok=True)
+
+    run_cfg = build_engine_config(merged)
+    device = resolve_device(trial_cfg)
+    run_once = run_dynamic if run_cfg.run_mode == "dynamic" else run_fixed
+
+    seeds = run_seed_averaged(
+        run_once=run_once,
+        config=config,
+        result_dir=trial_result_dir,
+        base_seed=config.seed,
+        num_seeds=config.num_seeds,
+        device=device,
+    )
+
+    validation_metric, validation_by_seed = _read_seed_metric_file_max(
+        trial_result_dir, seeds, "validation"
+    )
+    trial.set_user_attr("validation_accuracy", validation_metric)
+    trial.set_user_attr("validation_accuracy_by_seed", validation_by_seed)
+    trial.set_user_attr("result_dir", str(trial_result_dir))
+    trial.set_user_attr("result_path", str(trial_result_dir.relative_to(output_root)))
+    trial.set_user_attr("seeds", seeds)
+    trial.set_user_attr("num_seeds", config.num_seeds)
+    trial.set_user_attr("resolved_params", trial_params)
+    return validation_metric
+
+
+def _objective_grid(trial, base_cfg: DictConfig, output_root: Path, axis_lookup: dict, combos: list) -> float:
     trial_index = int(trial.number)
     if trial_index >= len(combos):
         raise IndexError(
             f"Trial index {trial_index} out of bounds for {len(combos)} combinations"
         )
-    trial_params = dict(combos[trial_index])
-
-    trial_cfg = OmegaConf.create(OmegaConf.to_container(base_cfg, resolve=False))
-    for path, value in trial_params.items():
-        OmegaConf.update(trial_cfg, path, value, merge=False)
-
-    folder_name = trial_folder_name(trial_params, axis_lookup)
-    trial_result_dir = trials_root / folder_name / "results"
-    trial_result_dir.mkdir(parents=True, exist_ok=True)
-    run_cfg = build_engine_config(trial_cfg)
-    seed_value = int(trial_cfg.seed) + trial_index
-    device = resolve_device(trial_cfg)
-
-    if run_cfg.run_mode == "dynamic":
-        run_dynamic(params=run_cfg.params, result_dir=trial_result_dir, seed=seed_value, device=device)
-    else:
-        run_fixed(params=run_cfg.params, result_dir=trial_result_dir, seed=seed_value, device=device)
-
-    validation_metric = _read_metric_file_max(trial_result_dir / "validation")
-    trial.set_user_attr("validation_accuracy", validation_metric)
-    trial.set_user_attr("result_dir", str(trial_result_dir))
-    trial.set_user_attr("seed", seed_value)
-    trial.set_user_attr("resolved_params", trial_params)
-    return validation_metric
+    return _objective_from_params(trial, base_cfg, output_root, axis_lookup, dict(combos[trial_index]))
 
 
-def _run_best_trial_test_evaluation(best_trial, base_cfg, output_root: Path) -> float:
+def _all_search_axes_categorical(search_space: dict) -> bool:
+    ordered_paths, _, _ = _normalize_search_space(search_space)
+    return all(_choices_from_spec(_strip_meta(search_space[path])[0]) for path in ordered_paths)
+
+
+def _suggest_value(trial, path: str, spec):
+    choices = _choices_from_spec(spec)
+    if choices:
+        return trial.suggest_categorical(path, choices)
+    if not isinstance(spec, dict):
+        raise ValueError(f"Unsupported Optuna search-space spec for '{path}': {spec!r}")
+    param_type = str(spec.get("type", "")).lower()
+    if param_type == "float":
+        return trial.suggest_float(
+            path,
+            float(spec["low"]),
+            float(spec["high"]),
+            log=bool(spec.get("log", False)),
+            step=spec.get("step"),
+        )
+    if param_type == "int":
+        return trial.suggest_int(
+            path,
+            int(spec["low"]),
+            int(spec["high"]),
+            step=int(spec.get("step", 1)),
+            log=bool(spec.get("log", False)),
+        )
+    raise ValueError(f"Unsupported Optuna search-space type for '{path}': {param_type!r}")
+
+
+def _suggest_trial_params(trial, base_cfg: DictConfig, search_space: dict) -> dict:
+    ordered_paths, _, _ = _normalize_search_space(search_space)
+    trial_cfg = _copy_dict_config(base_cfg)
+    trial_params = {}
+    for path in ordered_paths:
+        raw_spec = search_space[path]
+        when_clause = _when_clause(raw_spec)
+        if when_clause is not None and not _conditions_met(trial_cfg, when_clause):
+            continue
+        inner_spec, _ = _strip_meta(raw_spec)
+        value = _suggest_value(trial, path, inner_spec)
+        trial_params[path] = value
+        OmegaConf.update(trial_cfg, path, value, merge=False, force_add=True)
+    return trial_params
+
+
+def _objective_suggested(trial, base_cfg: DictConfig, output_root: Path, axis_lookup: dict, search_space: dict) -> float:
+    trial_params = _suggest_trial_params(trial, base_cfg, search_space)
+    return _objective_from_params(trial, base_cfg, output_root, axis_lookup, trial_params)
+
+
+def _run_best_trial_test_evaluation(best_trial, base_cfg: DictConfig, output_root: Path) -> float:
     best_params = _resolved_trial_params(best_trial)
-    best_cfg = OmegaConf.create(OmegaConf.to_container(base_cfg, resolve=False))
-    for param_path, sampled_value in best_params.items():
-        OmegaConf.update(best_cfg, param_path, sampled_value, merge=False)
+    best_cfg = _copy_dict_config(base_cfg)
+    _apply_trial_params(best_cfg, best_params)
+
+    # Convert to structured config
+    merged = OmegaConf.merge(OmegaConf.structured(BanditDLConfig), best_cfg)
+    # Enable evaluate_test specifically for this evaluation
+    merged.evaluation.evaluate_test = True
+    OmegaConf.resolve(merged)
+    config: BanditDLConfig = OmegaConf.to_object(merged)
 
     best_result_dir = output_root / "best_trial_test_eval" / "results"
     best_result_dir.mkdir(parents=True, exist_ok=True)
-    run_cfg = build_engine_config(best_cfg)
-    run_cfg.params["evaluate-test"] = True
-    seed_value = int(best_cfg.seed) + int(best_trial.number)
+
+    run_cfg = build_engine_config(merged)
     device = resolve_device(best_cfg)
+    run_once = run_dynamic if run_cfg.run_mode == "dynamic" else run_fixed
 
-    if run_cfg.run_mode == "dynamic":
-        run_dynamic(params=run_cfg.params, result_dir=best_result_dir, seed=seed_value, device=device)
-    else:
-        run_fixed(params=run_cfg.params, result_dir=best_result_dir, seed=seed_value, device=device)
+    seeds = run_seed_averaged(
+        run_once=run_once,
+        config=config,
+        result_dir=best_result_dir,
+        base_seed=config.seed,
+        num_seeds=config.num_seeds,
+        device=device,
+    )
 
-    return _read_metric_file_max(best_result_dir / "test")
+    test_metric, _ = _read_seed_metric_file_max(best_result_dir, seeds, "test")
+    return test_metric
 
 
-def _metrics_list_from_cfg(cfg) -> list[str]:
-    raw = cfg.get("plot_metrics")
-    if raw is None:
-        return []
-    return list(OmegaConf.to_container(raw, resolve=True))
+def _load_search_space(optuna_cfg) -> dict:
+    raw = OmegaConf.to_container(optuna_cfg.search_space, resolve=True)
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("optuna.search_space must be a non-empty mapping")
+    return {str(path): spec for path, spec in raw.items()}
 
 
 @hydra.main(version_base=None, config_path="../../conf", config_name="sweep")
-def main(cfg) -> None:
+def main(cfg: DictConfig) -> None:
     output_root = Path(HydraConfig.get().runtime.output_dir)
-    trials_root = output_root / "trials"
-    trials_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "trials").mkdir(parents=True, exist_ok=True)
 
     if "optuna" not in cfg:
         raise ValueError("Missing 'optuna' section in Hydra config")
@@ -117,24 +236,40 @@ def main(cfg) -> None:
     if "search_space" not in optuna_cfg:
         raise ValueError("Missing 'optuna.search_space' in Hydra config")
 
-    search_space = OmegaConf.to_container(optuna_cfg.search_space, resolve=True)
-    if not isinstance(search_space, dict) or not search_space:
-        raise ValueError("optuna.search_space must be a non-empty mapping")
-
-    combos = enumerate_valid_param_dicts(cfg, search_space)
-    if not combos:
-        raise ValueError(
-            "No categorical grid combinations found. Use categorical sweeps or add list-style search_space entries."
-        )
-
+    search_space = _load_search_space(optuna_cfg)
     _, axis_meta = build_axis_metadata(search_space)
     axis_lookup = {path: axis_meta.get(path, {}) for path in search_space.keys()}
 
-    direction = str(optuna_cfg.direction)
-    study = optuna.create_study(direction=direction)
-    total_trials = len(combos)
-    print(f"[optuna] grid trials={total_trials} | metric=validation_accuracy | trials_dir={trials_root}")
-    study.optimize(lambda trial: _objective(trial, cfg, trials_root, axis_lookup, combos), n_trials=total_trials)
+    study = optuna.create_study(
+        direction=str(optuna_cfg.direction),
+        storage=optuna_storage_url(output_root),
+        study_name=STUDY_NAME,
+        load_if_exists=True,
+    )
+
+    if _all_search_axes_categorical(search_space):
+        combos = enumerate_valid_param_dicts(cfg, search_space)
+        if not combos:
+            raise ValueError("No categorical grid combinations found.")
+        total_trials = len(combos)
+        print(
+            f"[optuna] grid trials={total_trials} | seeds_per_trial={int(cfg.num_seeds)} | "
+            f"metric=validation_accuracy | trials_dir={output_root / 'trials'}"
+        )
+        study.optimize(
+            lambda trial: _objective_grid(trial, cfg, output_root, axis_lookup, combos),
+            n_trials=total_trials,
+        )
+    else:
+        total_trials = int(optuna_cfg.get("n_trials", 20))
+        print(
+            f"[optuna] sampled trials={total_trials} | seeds_per_trial={int(cfg.num_seeds)} | "
+            f"metric=validation_accuracy | trials_dir={output_root / 'trials'}"
+        )
+        study.optimize(
+            lambda trial: _objective_suggested(trial, cfg, output_root, axis_lookup, search_space),
+            n_trials=total_trials,
+        )
 
     best = study.best_trial
     best_dir = best.user_attrs.get("result_dir")
@@ -150,23 +285,8 @@ def main(cfg) -> None:
     print(f"[optuna] best trial final test directory: {output_root / 'best_trial_test_eval' / 'results'}")
     print(f"[optuna] best trial final test_accuracy: {final_test_accuracy:.6f}")
 
-    metrics_list = _metrics_list_from_cfg(cfg)
-    plot_modes = normalize_plot_modes(cfg.get("plot_mode"))
-    plot_directions = normalize_directions(cfg.get("direction"))
-    sweep_plot_root = output_root / "sweep_artifacts"
-    plot_sweep(
-        plot_modes,
-        plot_directions,
-        trials_root,
-        study,
-        search_space,
-        metrics_list,
-        sweep_plot_root,
-    )
-    print(
-        f"[optuna] sweep plots written to: {sweep_plot_root} | "
-        f"modes={plot_modes} directions={plot_directions}"
-    )
+    plot_sweep_from_cfg(output_root, cfg, study=study)
+    print(f"[optuna] sweep plots written to: {output_root / 'sweep_artifacts'}")
 
 
 if __name__ == "__main__":

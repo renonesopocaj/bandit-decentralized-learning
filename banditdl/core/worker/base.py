@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 
 import torch
 
+from banditdl.core.worker.config import WorkerConfig
 from banditdl.data import models
 from banditdl.utils.math_utils import clip_vector
 from banditdl.utils.tensor_utils import flatten, unflatten
@@ -47,41 +48,26 @@ class HonestWorker(BaseWorker):
         worker_id,
         data_loader,
         data_loader_validation,
-        nb_workers,
-        nb_byz,
-        nb_real_byz,
-        model,
-        learning_rate,
-        learning_rate_decay,
-        learning_rate_decay_delta,
-        weight_decay,
-        loss,
-        momentum,
-        device,
-        labelflipping,
-        gradient_clip,
-        numb_labels,
-        nb_local_steps,
-        rag,
-        b_hat,
+        config: WorkerConfig,
     ):
         super().__init__(worker_id=worker_id, is_byzantine=False)
-        self.nb_byz = nb_byz
-        self.nb_real_byz = nb_real_byz
-        self.nb_honest = nb_workers - nb_byz
-        self.rag = rag
-        self.b_hat = b_hat
+        self.config = config
+        self.nb_byz = config.nb_byz
+        self.nb_real_byz = config.nb_real_byz
+        self.nb_honest = config.nb_workers - config.nb_byz
+        self.rag = config.rag
+        self.b_hat = config.b_hat
 
         self.loaders = {"train": data_loader, "validation": data_loader_validation}
         self.iterators = {"train": iter(data_loader), "validation": iter(data_loader_validation)}
 
-        self.initial_learning_rate = self.current_learning_rate = learning_rate
-        self.learning_rate_decay = learning_rate_decay
-        self.learning_rate_decay_delta = learning_rate_decay_delta
+        self.initial_learning_rate = self.current_learning_rate = config.learning_rate
+        self.learning_rate_decay = config.learning_rate_decay
+        self.learning_rate_decay_delta = config.learning_rate_decay_delta
 
-        self.device = device
-        self.loss = getattr(torch.nn, loss)()
-        self.model = getattr(models, model)()
+        self.device = config.device
+        self.loss = getattr(torch.nn, config.loss)()
+        self.model = getattr(models, config.model)()
         self.model.to(self.device)
         self.model_shapes = [param.shape for param in self.model.parameters()]
         self.model_size = len(flatten(self.model.parameters()))
@@ -90,17 +76,18 @@ class HonestWorker(BaseWorker):
             self.model = torch.nn.DataParallel(self.model, device_ids=[0, 1])
 
         self.optimizer = torch.optim.SGD(
-            self.model.parameters(), lr=self.initial_learning_rate, weight_decay=weight_decay
+            self.model.parameters(), lr=self.initial_learning_rate, weight_decay=config.weight_decay
         )
         self.momentum_gradient = torch.zeros(self.model_size, device=self.device)
-        self.momentum = momentum
-        self.gradient_clip = gradient_clip
+        self.momentum = config.momentum
+        self.gradient_clip = config.gradient_clip
 
-        self.labelflipping = labelflipping
-        self.numb_labels = numb_labels
-        self.nb_local_steps = nb_local_steps
+        self.labelflipping = config.labelflipping
+        self.numb_labels = config.numb_labels
+        self.nb_local_steps = config.nb_local_steps
         self.num_selected_byz = []
         self._current_step = 0
+        self.last_gradient_norm = float("nan")
 
     def sample_batch(self, mode):
         try:
@@ -152,15 +139,19 @@ class HonestWorker(BaseWorker):
         self.optimizer.step()
 
     def perform_local_step(self, current_step):
+        gradient_norms = []
         for _ in range(self.nb_local_steps):
-            self.set_gradient(self.compute_momentum())
+            gradient = self.compute_momentum()
+            gradient_norms.append(float(gradient.norm().detach().cpu().item()))
+            self.set_gradient(gradient)
             self.local_model_update(current_step)
+        if gradient_norms:
+            self.last_gradient_norm = sum(gradient_norms) / len(gradient_norms)
         return flatten(self.model.parameters())
 
     def train(self) -> None:
         self.perform_local_step(self._current_step)
         self._current_step += 1
-        return None
 
     def pull(self, context=None) -> torch.Tensor:
         return flatten(self.model.parameters())

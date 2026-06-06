@@ -1,7 +1,7 @@
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-import re
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,7 +17,6 @@ from banditdl.utils.metrics import (
     median,
     min_,
 )
-
 
 NODE_CURVE_COLORS = {
     "average": "tab:blue",
@@ -48,6 +47,10 @@ class Panel:
     ylabel: str
     series: Sequence[Series]
     ylim: tuple[float, float] | None = None
+    xlabel: str = "Round"
+    xscale: str = "linear"
+    yscale: str = "linear"
+    x_offset: float = 0.0
 
 
 def _extract_run_hparams(label: str) -> str | None:
@@ -80,12 +83,11 @@ def _mark_first_nonfinite(ax, x: np.ndarray, y: np.ndarray) -> None:
 
 
 class StandardPlotter:
-    def __init__(self, run_dir: Path, output_dir: Path, run_label: str | None = None):
-        self.run_dir = Path(run_dir)
+    def __init__(self, run_dirs: list[Path] | Path, output_dir: Path, labels: list[str] | None = None):
+        self.run_dirs = [run_dirs] if isinstance(run_dirs, Path) else run_dirs
         self.output_dir = Path(output_dir)
-        self.run_label = run_label or ""
-        self.loader = MetricLoader(self.run_dir)
-
+        self.labels = labels or [d.name for d in self.run_dirs]
+        self.loaders = [MetricLoader(d) for d in self.run_dirs]
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def plot(self, name: str, panels: Sequence[Panel]) -> Path:
@@ -102,73 +104,57 @@ class StandardPlotter:
 
         for idx, (ax, panel) in enumerate(zip(axes, panels, strict=True)):
             self._draw_panel(ax, panel)
-            ax.set_title(panel.title, pad=18 if idx == 0 else 8)
+            ax.set_title(panel.title, pad=8)
             ax.set_ylabel(panel.ylabel)
             if panel.ylim is not None:
                 ax.set_ylim(*panel.ylim)
+            ax.set_xscale(panel.xscale)
+            ax.set_yscale(panel.yscale)
             if idx == len(panels) - 1:
-                ax.set_xlabel("Round")
-            if idx == 0:
-                caption = _extract_run_hparams(self.run_label)
-                if caption:
-                    ax.text(
-                        0.5,
-                        1.01,
-                        caption,
-                        transform=ax.transAxes,
-                        ha="center",
-                        va="bottom",
-                        fontsize=9,
-                    )
-            ax.grid(True, alpha=0.25)
-            ax.legend(
-                loc="best", ncols=min(4, len(panel.series)), frameon=False, fontsize=8
-            )
+                ax.set_xlabel(panel.xlabel)
 
-        if any(
-            series.aggregate is not None for panel in panels for series in panel.series
-        ):
-            fig.text(
-                0.5,
-                0.01,
-                "Node-wise metrics are aggregated each round across nodes.",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
-            rect = (0.0, 0.06, 1.0, 0.97)
-        else:
-            rect = (0.0, 0.03, 1.0, 0.97)
+            ax.grid(True, alpha=0.25)
+            ax.legend(loc="best", fontsize=8, frameon=False)
 
         output = self.output_dir / name
-        fig.tight_layout(rect=rect)
+        fig.tight_layout()
         fig.savefig(output, dpi=160, bbox_inches="tight")
         plt.close(fig)
         return output
 
     def _draw_panel(self, ax, panel: Panel) -> None:
         for series in panel.series:
-            data = self.loader.load(
-                series.metric, interpolate_eval=series.interpolate_eval
-            )
-            values = data.values
-            if series.transform is not None:
-                values = series.transform(values)
-            y = self._aggregate(values, series)
-            color = series.color or NODE_CURVE_COLORS.get(series.label)
-            linestyle = NODE_LINESTYLE.get(series.label, series.linestyle)
-            marker = NODE_MARKERS.get(series.label, "o" if series.marker else None)
-            linewidth = NODE_LINEWIDTH.get(series.label, 1.7)
-            ax.plot(
-                data.x,
-                y,
-                marker=marker,
-                linewidth=linewidth,
-                color=color,
-                linestyle=linestyle,
-                label=series.label,
-            )
-            _mark_first_nonfinite(ax, data.x, y)
+            for loader_idx, loader in enumerate(self.loaders):
+                try:
+                    data = loader.load(series.metric, interpolate_eval=series.interpolate_eval)
+                except FileNotFoundError:
+                    continue
+
+                values = data.values
+                if series.transform is not None:
+                    values = series.transform(values)
+
+                y = self._aggregate(values, series)
+                x = data.x.astype(float) + panel.x_offset
+
+                label = series.label
+                if len(self.loaders) > 1:
+                    label = f"{self.labels[loader_idx]} - {label}"
+
+                color = series.color or NODE_CURVE_COLORS.get(series.label)
+                # If we have multiple loaders, we should probably vary colors/styles
+                if len(self.loaders) > 1:
+                    color = None # Let matplotlib cycle
+
+                ax.plot(
+                    x, y,
+                    marker=NODE_MARKERS.get(series.label, "o" if series.marker else None),
+                    linewidth=NODE_LINEWIDTH.get(series.label, 1.7),
+                    color=color,
+                    linestyle=NODE_LINESTYLE.get(series.label, series.linestyle),
+                    label=label,
+                )
+                _mark_first_nonfinite(ax, x, y)
 
     @staticmethod
     def _aggregate(values: np.ndarray, series: Series) -> np.ndarray:
@@ -225,8 +211,25 @@ def _sampler_aggressiveness_panels() -> list[Panel]:
     ]
 
 
-def plot_all(run_dir: Path, plots_dir: Path, run_label: str) -> None:
-    plotter = StandardPlotter(run_dir, plots_dir, run_label)
+def _gradient_norm_loglog_panel() -> Panel:
+    return Panel(
+        "Gradient Norm Decay",
+        "Gradient norm",
+        [
+            Series(MetricKey.GRADIENT_NORMS, "average", mean),
+            Series(MetricKey.GRADIENT_NORMS, "worst", max_, color="red", marker=False),
+            Series(MetricKey.GRADIENT_NORMS, "best", min_, color="green", marker=False),
+        ],
+        xlabel="Round + 1",
+        xscale="log",
+        yscale="log",
+        x_offset=1.0,
+    )
+
+
+def plot_all(run_dir: Path, plots_dir: Path, run_label: str | None = None) -> None:
+    labels = [run_label] if run_label else None
+    plotter = StandardPlotter(run_dir, plots_dir, labels=labels)
 
     plotter.plot(
         "val_accuracy.png",
@@ -278,6 +281,8 @@ def plot_all(run_dir: Path, plots_dir: Path, run_label: str) -> None:
         ],
     )
 
+    plotter.plot("gradient_norm_loglog.png", [_gradient_norm_loglog_panel()])
+
     plotter.plot(
         "sampler_aggressiveness.png",
         _sampler_aggressiveness_panels(),
@@ -289,33 +294,12 @@ def plot_all(run_dir: Path, plots_dir: Path, run_label: str) -> None:
             Panel(
                 "Reward",
                 "Reward",
-                _node_series(MetricKey.REWARD_ALGORITHM)
-                + [
-                    Series(
-                        MetricKey.REWARD_ORACLE,
-                        "oracle average",
-                        mean,
-                        color="black",
-                        linestyle="--",
-                        marker=False,
-                    )
-                ],
+                [*_node_series(MetricKey.REWARD_ALGORITHM), Series(MetricKey.REWARD_ORACLE, "oracle average", mean, color="black", linestyle="--", marker=False)],
             ),
             Panel(
                 "Time-normalized reward",
                 "Reward",
-                _node_series(MetricKey.REWARD_ALGORITHM, transform=TimeAverage())
-                + [
-                    Series(
-                        MetricKey.REWARD_ORACLE,
-                        "oracle average",
-                        mean,
-                        TimeAverage(),
-                        color="black",
-                        linestyle="--",
-                        marker=False,
-                    )
-                ],
+                [*_node_series(MetricKey.REWARD_ALGORITHM, transform=TimeAverage()), Series(MetricKey.REWARD_ORACLE, "oracle average", mean, TimeAverage(), color="black", linestyle="--", marker=False)],
             ),
         ],
     )
@@ -347,3 +331,15 @@ def plot_all(run_dir: Path, plots_dir: Path, run_label: str) -> None:
             ),
         ],
     )
+
+    from banditdl.utils.plot_graph import plot_clustering_graph
+
+    for weight_source in ("sampler_probability", "neighbor_disagreement"):
+        try:
+            plot_clustering_graph(
+                run_dir,
+                Path(plots_dir) / f"clustering_{weight_source}.png",
+                weight_source=weight_source,
+            )
+        except FileNotFoundError:
+            pass

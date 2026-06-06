@@ -118,6 +118,7 @@ def main() -> None:
             "normalized_regret",
             "neighbor_disagreement",
             "consensus_drift",
+            "gradient_norms",
             "sampler_kl_to_uniform",
             "sampler_aggressiveness",
         ],

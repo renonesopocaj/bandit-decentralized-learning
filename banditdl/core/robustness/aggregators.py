@@ -1,19 +1,19 @@
 """Robust aggregation methods for distributed Byzantine-resilient learning."""
 
-import torch
 import random
-import math
+
+import torch
+
 from banditdl.utils.math_utils import (
-    clip_vector,
-    smoothed_weiszfeld,
-    smoothed_weiszfeld2,
-    compute_distances,
-    get_vector_best_score,
-    get_vector_scores,
     average_nearest_neighbors,
+    clip_vector,
+    compute_closest_vectors_and_mean,
+    compute_distances,
     compute_min_diameter_subset,
     compute_min_variance_subset,
-    compute_closest_vectors_and_mean,
+    get_vector_best_score,
+    get_vector_scores,
+    smoothed_weiszfeld2,
 )
 
 
@@ -32,10 +32,6 @@ def median(_, vectors):
     #return torch.stack(vectors).median(dim=0)[0]
 
 
-def geometric_median_old(aggregator, vectors):
-    return smoothed_weiszfeld(aggregator.nb_workers, vectors)
-
-
 def geometric_median(aggregator, vectors):
     return smoothed_weiszfeld2(aggregator.nb_workers, vectors)
 
@@ -45,14 +41,6 @@ def krum(aggregator, vectors):
     distances = compute_distances(vectors)
     #JS: return the vector with smallest score
     return get_vector_best_score(vectors, aggregator.nb_byz, distances)
-
-
-def krum_old(aggregator, vectors): ##old krum
-    #JS: Compute all pairwise distances
-    distances = compute_distances(vectors)
-    #JS: return the vector with smallest score
-    result = get_vector_best_score(vectors, aggregator.nb_byz, distances)
-    return result
 
 
 def multi_krum(aggregator, vectors):
@@ -92,17 +80,6 @@ def server_clip(aggregator, vectors):
     for _, vector_id in f_largest:
         vectors[vector_id] = clip_vector(vectors[vector_id], clipping_threshold)
     return robust_aggregators[aggregator.aggregator_name](aggregator, vectors)
-
-
-def nearest_neighbor_mixing_old(aggregator, vectors, numb_iter=1):
-    for _ in range(numb_iter):
-        mixed_vectors = list()
-        for vector in vectors:
-            #JS: Replace every vector by the average of its nearest neighbors
-            mixed_vectors.append(average_nearest_neighbors(vectors, aggregator.nb_byz, vector))
-        vectors = mixed_vectors
-
-    return robust_aggregators[aggregator.second_aggregator](aggregator, vectors)
 
 
 def bucketing(aggregator, vectors):
@@ -229,7 +206,6 @@ robust_aggregators = {
     "average": average,
     "trmean": trmean,
     "median": median,
-    "geometric_median_old": geometric_median_old,
     "geometric_median": geometric_median,
     "krum": krum,
     "multi_krum": multi_krum,
@@ -242,12 +218,10 @@ robust_aggregators = {
     "mva": minimum_variance_averaging,
     "monna": monna,
     "meamed": meamed,
-    "krum_old": krum_old,
-    "nnm_old": nearest_neighbor_mixing_old,
 }
 
 
-class RobustAggregator(object):
+class RobustAggregator:
 
     def __init__(self, aggregator_name, second_aggregator, server_clip, nb_workers, nb_byz, bucket_size, model_size, device):
         self.aggregator_name = aggregator_name
