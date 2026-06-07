@@ -1,3 +1,4 @@
+name: femnist
 dataset: femnist
 model: cnn_femnist
 numb_labels: 62

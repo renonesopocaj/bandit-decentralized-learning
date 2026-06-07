@@ -1,3 +1,4 @@
+name: cifar10
 dataset: cifar10
 model: cnn_cifar
 numb_labels: 10

@@ -6,6 +6,7 @@ from typing import Any
 
 @dataclass
 class DatasetConfig:
+    name: str = "mnist"
     dataset: str = "mnist"
     model: str = "MnistNet"
     numb_labels: int = 10
@@ -46,6 +47,7 @@ class AggregatorConfig:
 
 @dataclass
 class TopologyConfig:
+    name: str = "dynamic"
     nodes: int = 10
     sampling: float = 0.2
 
