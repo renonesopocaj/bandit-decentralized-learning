@@ -24,9 +24,9 @@ def test_normalized_regret_is_derived_from_regret(tmp_path):
 
 
 def test_validation_accuracy_can_interpolate_to_full_round_axis(tmp_path):
-    (tmp_path / "validation").write_text("0\t0.1\n2\t0.5\n4\t0.9\n")
+    np.save(tmp_path / "evaluation_steps.npy", np.array([0, 2, 4]))
     np.save(
-        tmp_path / "validation_accuracies.npy",
+        tmp_path / "local_accuracy.npy",
         np.array([[0.0, 0.2], [0.4, 0.6], [0.8, 1.0]]),
     )
     np.save(tmp_path / "regret.npy", np.zeros((5, 2)))
@@ -51,10 +51,31 @@ def test_validation_accuracy_can_interpolate_to_full_round_axis(tmp_path):
     )
 
 
+def test_metric_loader_reads_current_engine_metric_names(tmp_path):
+    local_accuracy = np.array([[0.2, 0.4], [0.6, 0.8]])
+    local_loss = np.array([[2.0, 1.0], [0.8, 0.4]])
+    train_loss = np.array([[1.8, 0.9], [0.7, 0.3]])
+    np.save(tmp_path / "local_accuracy.npy", local_accuracy)
+    np.save(tmp_path / "local_loss.npy", local_loss)
+    np.save(tmp_path / "train_loss.npy", train_loss)
+
+    loader = MetricLoader(tmp_path)
+
+    np.testing.assert_allclose(
+        loader.load_values(MetricKey.VALIDATION_ACCURACIES),
+        local_accuracy,
+    )
+    np.testing.assert_allclose(
+        loader.load_values(MetricKey.VALIDATION_LOSSES),
+        local_loss,
+    )
+    np.testing.assert_allclose(loader.load_values(MetricKey.TRAIN_LOSSES), train_loss)
+
+
 def test_seed_stacked_validation_accuracy_interpolates_on_time_axis(tmp_path):
-    (tmp_path / "validation").write_text("0\t0.1\n2\t0.5\n4\t0.9\n")
+    np.save(tmp_path / "evaluation_steps.npy", np.array([0, 2, 4]))
     np.save(
-        tmp_path / "validation_accuracies_by_seed.npy",
+        tmp_path / "local_accuracy_by_seed.npy",
         np.array(
             [
                 [[0.0, 0.2], [0.4, 0.6], [0.8, 1.0]],

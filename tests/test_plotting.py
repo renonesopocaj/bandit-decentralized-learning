@@ -7,12 +7,9 @@ from banditdl.utils.plotting import plot_all
 
 
 def _write_common_plot_metrics(run_dir):
-    (run_dir / "validation").write_text("0\t0.1\n1\t0.2\n")
-    (run_dir / "validation_loss").write_text("0\t2.0\n1\t1.0\n")
-    (run_dir / "train_loss").write_text("0\t3.0\n1\t1.5\n")
-    np.save(run_dir / "validation_accuracies.npy", np.ones((2, 2)) * 0.5)
-    np.save(run_dir / "validation_losses.npy", np.ones((2, 2)))
-    np.save(run_dir / "train_losses.npy", np.ones((2, 2)))
+    np.save(run_dir / "local_accuracy.npy", np.ones((2, 2)) * 0.5)
+    np.save(run_dir / "local_loss.npy", np.ones((2, 2)))
+    np.save(run_dir / "train_loss.npy", np.ones((2, 2)))
     np.save(run_dir / "neighbor_disagreement.npy", np.ones((2, 2)))
     np.save(run_dir / "consensus_drift.npy", np.ones((2, 2)))
     np.save(run_dir / "sampler_kl_to_uniform.npy", np.ones((2, 2)))

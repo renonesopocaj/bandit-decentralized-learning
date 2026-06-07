@@ -13,6 +13,7 @@ class MetricKey(StrEnum):
     VALIDATION_ACCURACIES = "validation_accuracies"
     VALIDATION_LOSSES = "validation_losses"
     TRAIN_LOSSES = "train_losses"
+    TEST_ACCURACY = "test_accuracy"
     REWARD_ALGORITHM = "reward_algorithm"
     REWARD_ORACLE = "reward_oracle"
     REWARD_SELECTED_MIN = "reward_selected_min"
@@ -26,33 +27,19 @@ class MetricKey(StrEnum):
     SAMPLER_KL_TO_UNIFORM = "sampler_kl_to_uniform"
     SAMPLER_MIN_PROBABILITY = "sampler_min_probability"
     SAMPLER_MAX_PROBABILITY = "sampler_max_probability"
-    VALIDATION = "validation"
-    VALIDATION_WORST = "validation_worst"
-    VALIDATION_LOSS = "validation_loss"
-    TRAIN_LOSS = "train_loss"
-    TEST = "test"
 
 
 ALIASES = {
-    "accuracies": MetricKey.VALIDATION_ACCURACIES,
-    "val_accuracy": MetricKey.VALIDATION_ACCURACIES,
-    "eval": MetricKey.VALIDATION,
-    "eval_worst": MetricKey.VALIDATION_WORST,
-    "loss": MetricKey.VALIDATION_LOSS,
+    "local_accuracy": MetricKey.VALIDATION_ACCURACIES,
+    "local_loss": MetricKey.VALIDATION_LOSSES,
 }
 
 
 NPY_CANDIDATES = {
-    MetricKey.VALIDATION_ACCURACIES: ("validation_accuracies.npy", "accuracies.npy"),
-}
-
-
-TEXT_CANDIDATES = {
-    MetricKey.VALIDATION: ("validation", "eval"),
-    MetricKey.VALIDATION_WORST: ("validation_worst", "eval_worst"),
-    MetricKey.VALIDATION_LOSS: ("validation_loss",),
-    MetricKey.TRAIN_LOSS: ("train_loss",),
-    MetricKey.TEST: ("test",),
+    MetricKey.VALIDATION_ACCURACIES: ("local_accuracy.npy",),
+    MetricKey.VALIDATION_LOSSES: ("local_loss.npy",),
+    MetricKey.TRAIN_LOSSES: ("train_loss.npy",),
+    MetricKey.TEST_ACCURACY: ("test_accuracy.npy",),
 }
 
 
@@ -64,8 +51,6 @@ HIGHER_IS_WORSE = {
     MetricKey.GRADIENT_NORMS,
     MetricKey.VALIDATION_LOSSES,
     MetricKey.TRAIN_LOSSES,
-    MetricKey.VALIDATION_LOSS,
-    MetricKey.TRAIN_LOSS,
 }
 
 
@@ -176,40 +161,6 @@ def trim_unwritten_probability_rounds(probabilities: np.ndarray) -> np.ndarray:
     )
 
 
-def read_eval(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    steps: list[float] = []
-    values: list[float] = []
-    skipped = 0
-    with path.open() as fd:
-        for line in fd:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            tokens = line.split()
-            if len(tokens) < 2:
-                # Surface but tolerate corrupted lines (typically interleaved writes
-                # when multiple jobs collide on the same hydra run dir).
-                skipped += 1
-                continue
-            try:
-                step = float(tokens[0])
-                value = float(tokens[1])
-            except ValueError:
-                skipped += 1
-                continue
-            steps.append(step)
-            values.append(value)
-    if skipped:
-        import warnings
-
-        warnings.warn(
-            f"{path}: skipped {skipped} malformed line(s); the file may be from a "
-            "collided run-dir (check hydra.run.dir uniqueness).",
-            stacklevel=2,
-        )
-    return np.asarray(steps), np.asarray(values)
-
-
 def interpolate_to_steps(
     values: np.ndarray,
     source_steps: np.ndarray,
@@ -238,23 +189,33 @@ class MetricLoader:
 
     def load(self, metric: MetricKey | str, *, interpolate_eval: bool = False) -> MetricData:
         key = resolve_metric(metric)
-        if key in TEXT_CANDIDATES:
-            return self._load_text(key)
-
         values = self.load_values(key)
         x = np.arange(values.shape[_time_axis(values)])
-        if interpolate_eval and key == MetricKey.VALIDATION_ACCURACIES:
-            source_steps = self._load_text(MetricKey.VALIDATION).x
-            x = self.full_round_axis()
-            values = interpolate_to_steps(values, source_steps, x)
+        if interpolate_eval and key in {
+            MetricKey.VALIDATION_ACCURACIES,
+            MetricKey.VALIDATION_LOSSES,
+            MetricKey.TRAIN_LOSSES,
+        }:
+            try:
+                source_steps = self._load_evaluation_steps()
+            except FileNotFoundError:
+                pass
+            else:
+                values = self._align_to_evaluation_steps(values, source_steps)
+                x = source_steps
+                try:
+                    target_steps = self.full_round_axis()
+                except FileNotFoundError:
+                    pass
+                else:
+                    values = interpolate_to_steps(values, source_steps, target_steps)
+                    x = target_steps
         return MetricData(x=x, values=values)
 
     def load_values(self, metric: MetricKey | str) -> np.ndarray:
         key = resolve_metric(metric)
         if key == MetricKey.NORMALIZED_REGRET:
             return TimeAverage()(self.load_values(MetricKey.REGRET))
-        if key in TEXT_CANDIDATES:
-            return self._load_text(key).values
         if key in SAMPLER_PROBABILITY_DERIVED:
             try:
                 return sampler_probability_summary(
@@ -286,8 +247,6 @@ class MetricLoader:
         key = resolve_metric(metric)
         if key == MetricKey.NORMALIZED_REGRET:
             return TimeAverage()(self.load_seed_values(MetricKey.REGRET))
-        if key in TEXT_CANDIDATES:
-            return self._load_seed_text(key)
         if key in SAMPLER_PROBABILITY_DERIVED:
             try:
                 return sampler_probability_summary(
@@ -330,34 +289,30 @@ class MetricLoader:
             by_seed_path = self.run_dir / f"{key.value}_by_seed.npy"
             if by_seed_path.exists():
                 return np.arange(self.load_seed_values(key).shape[1])
-        validation = self._load_text(MetricKey.VALIDATION)
-        return np.arange(int(np.max(validation.x)) + 1)
+        evaluation_steps = self._load_evaluation_steps()
+        return np.arange(int(np.max(evaluation_steps)) + 1)
 
-    def _load_text(self, metric: MetricKey) -> MetricData:
-        for filename in TEXT_CANDIDATES[metric]:
-            path = self.run_dir / filename
-            if path.exists():
-                x, values = read_eval(path)
-                if values.size == 0:
-                    raise ValueError(f"{path} is empty")
-                return MetricData(x=x, values=values)
-        raise FileNotFoundError(self.run_dir / TEXT_CANDIDATES[metric][0])
+    def _load_evaluation_steps(self) -> np.ndarray:
+        path = self.run_dir / "evaluation_steps.npy"
+        if not path.exists():
+            raise FileNotFoundError(path)
+        steps = np.asarray(np.load(path), dtype=float)
+        steps = steps[np.isfinite(steps)]
+        if steps.size == 0:
+            raise ValueError(f"{path} is empty")
+        return steps
 
-    def _load_seed_text(self, metric: MetricKey) -> np.ndarray:
-        for filename in TEXT_CANDIDATES[metric]:
-            by_seed_path = self.run_dir / f"{filename}_by_seed.npy"
-            if by_seed_path.exists():
-                values = np.load(by_seed_path)
-                if values.size == 0:
-                    raise ValueError(f"{by_seed_path} is empty")
-                return values
-            path = self.run_dir / filename
-            if path.exists():
-                _, values = read_eval(path)
-                if values.size == 0:
-                    raise ValueError(f"{path} is empty")
-                return values[np.newaxis, ...]
-        raise FileNotFoundError(self.run_dir / TEXT_CANDIDATES[metric][0])
+    def _align_to_evaluation_steps(
+        self,
+        values: np.ndarray,
+        steps: np.ndarray,
+    ) -> np.ndarray:
+        time_axis = _time_axis(values)
+        if values.shape[time_axis] == steps.shape[0]:
+            return values
+        if values.shape[time_axis] < steps.shape[0]:
+            raise ValueError("evaluation_steps.npy has more steps than metric values")
+        return np.take(values, np.arange(steps.shape[0]), axis=time_axis)
 
     def _npy_paths(self, filename: str) -> tuple[Path, Path]:
         stem = Path(filename).stem

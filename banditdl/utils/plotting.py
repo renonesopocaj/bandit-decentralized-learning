@@ -249,14 +249,20 @@ def plot_all(run_dir: Path, plots_dir: Path, run_label: str | None = None) -> No
             Panel(
                 "Validation Loss",
                 "Loss",
-                [Series(MetricKey.VALIDATION_LOSS, "validation loss")],
+                _node_series(MetricKey.VALIDATION_LOSSES, interpolate_eval=True),
             )
         ],
     )
 
     plotter.plot(
         "train_loss.png",
-        [Panel("Training Loss", "Loss", [Series(MetricKey.TRAIN_LOSS, "train loss")])],
+        [
+            Panel(
+                "Training Loss",
+                "Loss",
+                _node_series(MetricKey.TRAIN_LOSSES, interpolate_eval=True),
+            )
+        ],
     )
 
     plotter.plot(

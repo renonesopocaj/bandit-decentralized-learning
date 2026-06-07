@@ -19,13 +19,6 @@ import numpy as np
 
 from banditdl.experiments.config_schema import BanditDLConfig
 
-TEXT_METRIC_FILES: tuple[str, ...] = (
-    "validation",
-    "validation_worst",
-    "validation_loss",
-    "train_loss",
-    "test",
-)
 NON_AVERAGEABLE_ARRAYS: tuple[str, ...] = (
     "selected_neighbors.npy",
     "oracle_neighbors.npy",
@@ -105,7 +98,6 @@ def aggregate_seed_results(result_dir: Path, seeds: list[int]) -> None:
 
     result_dir.mkdir(parents=True, exist_ok=True)
     _write_seed_metadata(result_dir, seeds, seed_dirs)
-    _aggregate_text_metrics(result_dir, seed_dirs)
     _aggregate_numpy_metrics(result_dir, seed_dirs)
 
 
@@ -116,78 +108,6 @@ def _write_seed_metadata(result_dir: Path, seeds: list[int], seed_dirs: list[Pat
         "seed_result_dirs": [str(seed_dir) for seed_dir in seed_dirs],
     }
     (result_dir / "seed_metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
-
-
-def _aggregate_text_metrics(result_dir: Path, seed_dirs: list[Path]) -> None:
-    for filename in TEXT_METRIC_FILES:
-        paths = [seed_dir / filename for seed_dir in seed_dirs]
-        existing = [path.exists() for path in paths]
-        if not any(existing):
-            continue
-        if not all(existing):
-            missing = [str(path) for path in paths if not path.exists()]
-            raise FileNotFoundError(
-                f"Metric file {filename!r} is missing for some seeds: {missing}"
-            )
-
-        header, steps, values = _stack_text_metric(paths)
-        mean_values = np.nanmean(values, axis=0)
-        _write_text_metric(result_dir / filename, header, steps, mean_values)
-        np.save(result_dir / f"{filename}_by_seed.npy", values)
-        np.save(result_dir / f"{filename}_steps.npy", steps)
-
-
-def _stack_text_metric(paths: list[Path]) -> tuple[str, np.ndarray, np.ndarray]:
-    header_ref = ""
-    steps_ref: np.ndarray | None = None
-    values = []
-    for path in paths:
-        header, steps, metric_values = _read_text_metric(path)
-        if steps_ref is None:
-            header_ref = header
-            steps_ref = steps
-        elif not np.array_equal(steps_ref, steps):
-            raise ValueError(f"Metric steps differ across seeds for {path.name}")
-        values.append(metric_values)
-    if steps_ref is None:
-        raise ValueError("paths must be non-empty")
-    return header_ref, steps_ref, np.stack(values, axis=0)
-
-
-def _read_text_metric(path: Path) -> tuple[str, np.ndarray, np.ndarray]:
-    header = ""
-    steps: list[float] = []
-    values: list[float] = []
-    with path.open() as fd:
-        for line in fd:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if stripped.startswith("#"):
-                if not header:
-                    header = stripped
-                continue
-            fields = stripped.split()
-            if len(fields) < 2:
-                raise ValueError(f"Malformed metric line in {path}: {line!r}")
-            steps.append(float(fields[0]))
-            values.append(float(fields[1]))
-    if not values:
-        raise ValueError(f"No metric values found in {path}")
-    return header, np.asarray(steps, dtype=float), np.asarray(values, dtype=float)
-
-
-def _write_text_metric(path: Path, header: str, steps: np.ndarray, values: np.ndarray) -> None:
-    lines = [header if header else "# Step number\tValue"]
-    for step, value in zip(steps, values, strict=True):
-        lines.append(f"{_format_step(step)}\t{value}")
-    path.write_text("\n".join(lines) + "\n")
-
-
-def _format_step(step: float) -> str:
-    if float(step).is_integer():
-        return str(int(step))
-    return str(step)
 
 
 def _aggregate_numpy_metrics(result_dir: Path, seed_dirs: list[Path]) -> None:

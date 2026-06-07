@@ -44,7 +44,7 @@ def plot_runs(
         data = loader.load(
             metric,
             interpolate_eval=metric
-            in {"accuracies", "val_accuracy", "validation_accuracies"},
+            in {"validation_accuracies", "validation_losses", "train_losses"},
         )
         values = data.values
         if values.ndim > 1:
@@ -93,7 +93,7 @@ def main() -> None:
         "run_dirs",
         nargs="+",
         type=Path,
-        help="Directories containing val_accuracy/validation_loss and other run metrics",
+        help="Directories containing current engine .npy metrics",
     )
     parser.add_argument(
         "-o", "--output", type=Path, default=Path("plot.png"), help="Output image path"
@@ -101,15 +101,10 @@ def main() -> None:
     parser.add_argument(
         "--metric",
         choices=[
-            "accuracies",
-            "val_accuracy",
-            "validation_loss",
-            "train_loss",
-            "validation",
-            "validation_worst",
-            "test",
-            "eval",
-            "eval_worst",
+            "validation_accuracies",
+            "validation_losses",
+            "train_losses",
+            "test_accuracy",
             "reward_algorithm",
             "reward_oracle",
             "reward_selected_min",
@@ -122,7 +117,7 @@ def main() -> None:
             "sampler_kl_to_uniform",
             "sampler_aggressiveness",
         ],
-        default="val_accuracy",
+        default="validation_accuracies",
     )
     parser.add_argument(
         "--stat",

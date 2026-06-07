@@ -323,7 +323,7 @@ uv run -m banditdl dataset=mnist topology=my_dynamic sampler=my_bandit adversary
 ## Plot Saved Results
 
 Each Hydra run writes artifacts directly in its run folder:
-- `<hydra_run>/results/`: raw metrics and arrays (`validation`, `validation_worst`, `test` (optional), `*.npy`).
+- `<hydra_run>/results/`: metrics as NumPy arrays (`local_accuracy.npy`, `local_loss.npy`, `train_loss.npy`, `test_accuracy.npy` when enabled, plus dynamic diagnostics).
 - `<hydra_run>/plots/`: auto-generated plots for all supported metrics.
 
 Example run folder:
@@ -368,11 +368,10 @@ uv run python scripts/plot_results.py \
 ```
 
 Useful options:
-- `--metric validation_accuracies`: plot from `validation_accuracies.npy` (default; `accuracies` is a legacy alias).
-- `--metric validation`: plot average accuracy from `validation`.
-- `--metric validation_worst`: plot worst-worker accuracy from `validation_worst`.
-- `--metric test`: plot held-out test accuracy from `test` (single final point when available).
-- `--metric eval|eval_worst`: legacy aliases for older run folders.
+- `--metric validation_accuracies`: plot from `local_accuracy.npy` (default).
+- `--metric validation_losses`: plot from `local_loss.npy`.
+- `--metric train_losses`: plot from `train_loss.npy`.
+- `--metric test_accuracy`: plot from `test_accuracy.npy`.
 - `--metric regret`: plot regret against the best fixed neighbor subset in hindsight.
 - `--metric normalized_regret`: plot time-averaged regret, derived from `regret.npy`.
 - `--metric reward_algorithm|reward_oracle`: plot cumulative reward curves,

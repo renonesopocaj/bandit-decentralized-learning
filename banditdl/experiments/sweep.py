@@ -26,34 +26,21 @@ from banditdl.utils.plot_sweep_base import (
 from banditdl.utils.seed_averaging import run_seed_averaged, seed_result_dir
 
 
-def _read_metric_file_max(metric_file: Path) -> float:
+def _read_final_metric(metric_file: Path) -> float:
     if not metric_file.exists():
         raise FileNotFoundError(f"Missing metric file: {metric_file}")
-
-    metric_values = []
-    for i, line in enumerate(metric_file.read_text().splitlines()):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        fields = stripped.split("\t")
-        try:
-            if len(fields) >= 2:
-                metric_values.append(float(fields[1]))
-            else:
-                print(f"Warning: Malformed line {i + 1} in {metric_file} (too few fields)")
-        except ValueError:
-            print(f"Warning: Could not parse metric value on line {i + 1} in {metric_file}")
-
-    if not metric_values:
-        raise ValueError(f"No valid metric values found in: {metric_file}")
-    return max(metric_values)
+    values = np.asarray(np.load(metric_file), dtype=float)
+    if values.size == 0:
+        raise ValueError(f"{metric_file} is empty")
+    final = values[-1] if values.ndim > 1 else values
+    return float(np.nanmean(final))
 
 
-def _read_seed_metric_file_max(
+def _read_seed_final_metric(
     result_dir: Path, seeds: list[int], metric_name: str
 ) -> tuple[float, list[float]]:
     seed_values = [
-        _read_metric_file_max(seed_result_dir(result_dir, seed) / metric_name) for seed in seeds
+        _read_final_metric(seed_result_dir(result_dir, seed) / metric_name) for seed in seeds
     ]
     return float(np.mean(seed_values)), seed_values
 
@@ -107,8 +94,8 @@ def _objective_from_params(
         device=device,
     )
 
-    validation_metric, validation_by_seed = _read_seed_metric_file_max(
-        trial_result_dir, seeds, "validation"
+    validation_metric, validation_by_seed = _read_seed_final_metric(
+        trial_result_dir, seeds, "local_accuracy.npy"
     )
     trial.set_user_attr("validation_accuracy", validation_metric)
     trial.set_user_attr("validation_accuracy_by_seed", validation_by_seed)
@@ -207,7 +194,7 @@ def _run_best_trial_test_evaluation(best_trial, base_cfg: DictConfig, output_roo
         device=device,
     )
 
-    test_metric, _ = _read_seed_metric_file_max(best_result_dir, seeds, "test")
+    test_metric, _ = _read_seed_final_metric(best_result_dir, seeds, "test_accuracy.npy")
     return test_metric
 
 

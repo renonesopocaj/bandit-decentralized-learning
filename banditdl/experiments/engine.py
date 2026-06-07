@@ -95,9 +95,16 @@ class ResultTracker:
         # Progressive saving for all metrics
         self.mmaps = {}
         delta = cfg.evaluation.evaluation_delta
-        nb_evals = (cfg.effective_rounds // delta) + 1 if delta > 0 else 1
+        nb_evals = (
+            (cfg.effective_rounds // delta)
+            + 1
+            + int(cfg.effective_rounds % delta != 0)
+            if delta > 0
+            else 1
+        )
 
         mmap_configs = {
+            "evaluation_steps.npy": (nb_evals,),
             "local_accuracy.npy": (nb_evals, cfg.nb_honests),
             "local_loss.npy": (nb_evals, cfg.nb_honests),
             "global_accuracy.npy": (nb_evals, cfg.nb_honests),  # Periodic subsampled eval
@@ -146,12 +153,16 @@ class ResultTracker:
     def evaluate_step(self, step, honest_workers):
         mean_acc, mean_v, mean_t = None, None, None
         delta = self.cfg.evaluation.evaluation_delta
-        if delta > 0 and step % delta == 0:
-            eval_idx = step // delta
+        should_evaluate = delta > 0 and (
+            step % delta == 0 or step == self.cfg.effective_rounds
+        )
+        if should_evaluate and step not in self.validation_steps:
+            eval_idx = len(self.validation_steps)
             accs = [w.compute_validation_accuracy() for w in honest_workers]
             v_losses = [w.compute_validation_loss() for w in honest_workers]
             t_losses = [w.compute_train_loss() for w in honest_workers]
 
+            self.mmaps["evaluation_steps.npy"][eval_idx] = step
             self.mmaps["local_accuracy.npy"][eval_idx] = np.array(accs, dtype="float32")
             self.mmaps["local_loss.npy"][eval_idx] = np.array(v_losses, dtype="float32")
             self.mmaps["train_loss.npy"][eval_idx] = np.array(t_losses, dtype="float32")
@@ -166,7 +177,7 @@ class ResultTracker:
             self.validation_steps.append(step)
 
             if eval_idx % 5 == 0:
-                for name in ["local_accuracy.npy", "local_loss.npy", "train_loss.npy", "global_accuracy.npy"]:
+                for name in ["evaluation_steps.npy", "local_accuracy.npy", "local_loss.npy", "train_loss.npy", "global_accuracy.npy"]:
                     self.mmaps[name].flush()
 
         if _should_log_step(step, self.cfg.effective_rounds):
@@ -223,11 +234,11 @@ class ResultTracker:
             _atomic_save(d / "regret.npy", regret)
 
     def finalize(self, honest_workers):
-        # Ensure final evaluation is recorded
-        self.evaluate_step(self.cfg.effective_rounds, honest_workers)
+        if not self.validation_steps or self.validation_steps[-1] != self.cfg.effective_rounds:
+            self.evaluate_step(self.cfg.effective_rounds, honest_workers)
 
         if len(self.validation_steps) > 0:
-            eval_idx = (self.cfg.effective_rounds // self.cfg.evaluation.evaluation_delta)
+            eval_idx = len(self.validation_steps) - 1
             last_accs = self.mmaps["local_accuracy.npy"][eval_idx]
             # Replace NaNs with infinity for min finding
             last_accs_clean = np.where(np.isnan(last_accs), np.inf, last_accs)
@@ -237,7 +248,7 @@ class ResultTracker:
         if self.cfg.evaluation.evaluate_test and self.test_loader:
             accs = [w.compute_accuracy_on_loader(self.test_loader) for w in honest_workers]
             global_acc_arr = np.array(accs, dtype="float32")
-            np.save(self.result_dir / "global_accuracy.npy", global_acc_arr)
+            np.save(self.result_dir / "test_accuracy.npy", global_acc_arr)
             logger.info(f"Final Mean Global Accuracy: {np.mean(global_acc_arr):.4f}")
 
         self.save_snapshot()
