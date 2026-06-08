@@ -7,8 +7,9 @@ from banditdl.utils.plotting import plot_all
 
 
 def _write_common_plot_metrics(run_dir):
-    np.save(run_dir / "local_accuracy.npy", np.ones((2, 2)) * 0.5)
-    np.save(run_dir / "local_loss.npy", np.ones((2, 2)))
+    np.save(run_dir / "validation_accuracy.npy", np.ones((2, 2)) * 0.5)
+    np.save(run_dir / "validation_loss.npy", np.ones((2, 2)))
+    np.save(run_dir / "global_accuracy.npy", np.ones((2, 2)) * 0.4)
     np.save(run_dir / "train_loss.npy", np.ones((2, 2)))
     np.save(run_dir / "neighbor_disagreement.npy", np.ones((2, 2)))
     np.save(run_dir / "consensus_drift.npy", np.ones((2, 2)))
@@ -34,3 +35,4 @@ def test_plot_all_writes_gradient_norm_loglog_plot(tmp_path):
     output = plots_dir / "gradient_norm_loglog.png"
     assert output.is_file()
     assert output.stat().st_size > 0
+    assert (plots_dir / "global_accuracy.png").is_file()

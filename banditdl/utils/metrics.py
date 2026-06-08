@@ -10,9 +10,10 @@ import numpy as np
 
 
 class MetricKey(StrEnum):
-    VALIDATION_ACCURACIES = "validation_accuracies"
-    VALIDATION_LOSSES = "validation_losses"
-    TRAIN_LOSSES = "train_losses"
+    VALIDATION_ACCURACY = "validation_accuracy"
+    VALIDATION_LOSS = "validation_loss"
+    GLOBAL_ACCURACY = "global_accuracy"
+    TRAIN_LOSS = "train_loss"
     TEST_ACCURACY = "test_accuracy"
     REWARD_ALGORITHM = "reward_algorithm"
     REWARD_ORACLE = "reward_oracle"
@@ -29,16 +30,14 @@ class MetricKey(StrEnum):
     SAMPLER_MAX_PROBABILITY = "sampler_max_probability"
 
 
-ALIASES = {
-    "local_accuracy": MetricKey.VALIDATION_ACCURACIES,
-    "local_loss": MetricKey.VALIDATION_LOSSES,
-}
+ALIASES = {}
 
 
 NPY_CANDIDATES = {
-    MetricKey.VALIDATION_ACCURACIES: ("local_accuracy.npy",),
-    MetricKey.VALIDATION_LOSSES: ("local_loss.npy",),
-    MetricKey.TRAIN_LOSSES: ("train_loss.npy",),
+    MetricKey.VALIDATION_ACCURACY: ("validation_accuracy.npy",),
+    MetricKey.VALIDATION_LOSS: ("validation_loss.npy",),
+    MetricKey.GLOBAL_ACCURACY: ("global_accuracy.npy",),
+    MetricKey.TRAIN_LOSS: ("train_loss.npy",),
     MetricKey.TEST_ACCURACY: ("test_accuracy.npy",),
 }
 
@@ -49,8 +48,8 @@ HIGHER_IS_WORSE = {
     MetricKey.NEIGHBOR_DISAGREEMENT,
     MetricKey.CONSENSUS_DRIFT,
     MetricKey.GRADIENT_NORMS,
-    MetricKey.VALIDATION_LOSSES,
-    MetricKey.TRAIN_LOSSES,
+    MetricKey.VALIDATION_LOSS,
+    MetricKey.TRAIN_LOSS,
 }
 
 
@@ -134,6 +133,13 @@ def sampler_probability_summary(metric: MetricKey, probabilities: np.ndarray) ->
     for worker_id in range(min(workers, arms)):
         mask[worker_id, worker_id] = False
     valid = probabilities[..., mask].reshape(*probabilities.shape[:-2], workers, arms - 1)
+    totals = np.nansum(valid, axis=-1, keepdims=True)
+    valid = np.divide(
+        valid,
+        totals,
+        out=np.full_like(valid, np.nan, dtype=float),
+        where=totals > 0,
+    )
 
     if metric == MetricKey.SAMPLER_MIN_PROBABILITY:
         return np.nanmin(valid, axis=-1)
@@ -192,9 +198,9 @@ class MetricLoader:
         values = self.load_values(key)
         x = np.arange(values.shape[_time_axis(values)])
         if interpolate_eval and key in {
-            MetricKey.VALIDATION_ACCURACIES,
-            MetricKey.VALIDATION_LOSSES,
-            MetricKey.TRAIN_LOSSES,
+            MetricKey.VALIDATION_ACCURACY,
+            MetricKey.VALIDATION_LOSS,
+            MetricKey.GLOBAL_ACCURACY,
         }:
             try:
                 source_steps = self._load_evaluation_steps()
@@ -274,6 +280,7 @@ class MetricLoader:
         raise FileNotFoundError(self.run_dir / f"{key.value}.npy")
 
     def full_round_axis(self) -> np.ndarray:
+        max_step: int | None = None
         for key in (
             MetricKey.NEIGHBOR_DISAGREEMENT,
             MetricKey.CONSENSUS_DRIFT,
@@ -285,12 +292,19 @@ class MetricLoader:
         ):
             path = self.run_dir / f"{key.value}.npy"
             if path.exists():
-                return np.arange(self.load_values(key).shape[0])
+                max_step = max(max_step or 0, self.load_values(key).shape[0] - 1)
             by_seed_path = self.run_dir / f"{key.value}_by_seed.npy"
             if by_seed_path.exists():
-                return np.arange(self.load_seed_values(key).shape[1])
-        evaluation_steps = self._load_evaluation_steps()
-        return np.arange(int(np.max(evaluation_steps)) + 1)
+                max_step = max(max_step or 0, self.load_seed_values(key).shape[1] - 1)
+        try:
+            evaluation_steps = self._load_evaluation_steps()
+        except FileNotFoundError:
+            pass
+        else:
+            max_step = max(max_step or 0, int(np.max(evaluation_steps)))
+        if max_step is None:
+            raise FileNotFoundError(self.run_dir / "evaluation_steps.npy")
+        return np.arange(max_step + 1)
 
     def _load_evaluation_steps(self) -> np.ndarray:
         path = self.run_dir / "evaluation_steps.npy"

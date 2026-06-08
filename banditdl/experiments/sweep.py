@@ -95,7 +95,7 @@ def _objective_from_params(
     )
 
     validation_metric, validation_by_seed = _read_seed_final_metric(
-        trial_result_dir, seeds, "local_accuracy.npy"
+        trial_result_dir, seeds, "validation_accuracy.npy"
     )
     trial.set_user_attr("validation_accuracy", validation_metric)
     trial.set_user_attr("validation_accuracy_by_seed", validation_by_seed)

@@ -105,10 +105,10 @@ class ResultTracker:
 
         mmap_configs = {
             "evaluation_steps.npy": (nb_evals,),
-            "local_accuracy.npy": (nb_evals, cfg.nb_honests),
-            "local_loss.npy": (nb_evals, cfg.nb_honests),
+            "validation_accuracy.npy": (nb_evals, cfg.nb_honests),
+            "validation_loss.npy": (nb_evals, cfg.nb_honests),
             "global_accuracy.npy": (nb_evals, cfg.nb_honests),  # Periodic subsampled eval
-            "train_loss.npy": (nb_evals, cfg.nb_honests),
+            "train_loss.npy": (cfg.effective_rounds + 1, cfg.nb_honests),
             "neighbor_disagreement.npy": (cfg.effective_rounds, cfg.nb_honests),
             "consensus_drift.npy": (cfg.effective_rounds, cfg.nb_honests),
             "gradient_norms.npy": (cfg.effective_rounds, cfg.nb_honests),
@@ -151,7 +151,7 @@ class ResultTracker:
             json.dump(audit_data, f, indent=2)
 
     def evaluate_step(self, step, honest_workers):
-        mean_acc, mean_v, mean_t = None, None, None
+        mean_acc, mean_v = None, None
         delta = self.cfg.evaluation.evaluation_delta
         should_evaluate = delta > 0 and (
             step % delta == 0 or step == self.cfg.effective_rounds
@@ -160,12 +160,10 @@ class ResultTracker:
             eval_idx = len(self.validation_steps)
             accs = [w.compute_validation_accuracy() for w in honest_workers]
             v_losses = [w.compute_validation_loss() for w in honest_workers]
-            t_losses = [w.compute_train_loss() for w in honest_workers]
 
             self.mmaps["evaluation_steps.npy"][eval_idx] = step
-            self.mmaps["local_accuracy.npy"][eval_idx] = np.array(accs, dtype="float32")
-            self.mmaps["local_loss.npy"][eval_idx] = np.array(v_losses, dtype="float32")
-            self.mmaps["train_loss.npy"][eval_idx] = np.array(t_losses, dtype="float32")
+            self.mmaps["validation_accuracy.npy"][eval_idx] = np.array(accs, dtype="float32")
+            self.mmaps["validation_loss.npy"][eval_idx] = np.array(v_losses, dtype="float32")
 
             # Periodic Global Generalization (Subsampled)
             if self.test_loader_sub:
@@ -173,16 +171,25 @@ class ResultTracker:
                 self.mmaps["global_accuracy.npy"][eval_idx] = np.array(g_accs, dtype="float32")
                 logger.info(f"Step {step} | Mean Local Acc: {sum(accs)/len(accs):.4f} | Mean Global Acc (sub): {sum(g_accs)/len(g_accs):.4f}")
 
-            mean_acc, mean_v, mean_t = sum(accs) / len(accs), sum(v_losses) / len(v_losses), sum(t_losses) / len(t_losses)
+            mean_acc, mean_v = sum(accs) / len(accs), sum(v_losses) / len(v_losses)
             self.validation_steps.append(step)
 
             if eval_idx % 5 == 0:
-                for name in ["evaluation_steps.npy", "local_accuracy.npy", "local_loss.npy", "train_loss.npy", "global_accuracy.npy"]:
+                for name in ["evaluation_steps.npy", "validation_accuracy.npy", "validation_loss.npy", "global_accuracy.npy"]:
                     self.mmaps[name].flush()
 
         if _should_log_step(step, self.cfg.effective_rounds):
-            _log_progress(step, self.cfg, mean_acc, mean_v, mean_t)
-        return mean_acc, mean_v, mean_t
+            _log_progress(step, self.cfg, mean_acc, mean_v)
+        return mean_acc, mean_v
+
+    def record_train_loss(self, step, honest_workers):
+        if step <= self.cfg.effective_rounds:
+            losses = [w.compute_train_loss() for w in honest_workers]
+            self.mmaps["train_loss.npy"][step] = np.array(losses, dtype="float32")
+            if step % 10 == 0 or step == self.cfg.effective_rounds:
+                self.mmaps["train_loss.npy"].flush()
+            return sum(losses) / len(losses)
+        return None
 
     def record_gradient_norms(self, step, honest_workers):
         """Record the gradient norm for each worker."""
@@ -239,7 +246,7 @@ class ResultTracker:
 
         if len(self.validation_steps) > 0:
             eval_idx = len(self.validation_steps) - 1
-            last_accs = self.mmaps["local_accuracy.npy"][eval_idx]
+            last_accs = self.mmaps["validation_accuracy.npy"][eval_idx]
             # Replace NaNs with infinity for min finding
             last_accs_clean = np.where(np.isnan(last_accs), np.inf, last_accs)
             worst_idx = np.argmin(last_accs_clean)
@@ -450,6 +457,7 @@ def run_experiment(
 
         for step in range(cfg.effective_rounds + 1):
             tracker.evaluate_step(step, honest_workers)
+            tracker.record_train_loss(step, honest_workers)
             if step < cfg.effective_rounds:
                 for w in honest_workers:
                     w.train()

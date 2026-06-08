@@ -44,7 +44,7 @@ def plot_runs(
         data = loader.load(
             metric,
             interpolate_eval=metric
-            in {"validation_accuracies", "validation_losses", "train_losses"},
+            in {"validation_accuracy", "validation_loss", "global_accuracy"},
         )
         values = data.values
         if values.ndim > 1:
@@ -101,9 +101,10 @@ def main() -> None:
     parser.add_argument(
         "--metric",
         choices=[
-            "validation_accuracies",
-            "validation_losses",
-            "train_losses",
+            "validation_accuracy",
+            "validation_loss",
+            "global_accuracy",
+            "train_loss",
             "test_accuracy",
             "reward_algorithm",
             "reward_oracle",
@@ -117,7 +118,7 @@ def main() -> None:
             "sampler_kl_to_uniform",
             "sampler_aggressiveness",
         ],
-        default="validation_accuracies",
+        default="validation_accuracy",
     )
     parser.add_argument(
         "--stat",

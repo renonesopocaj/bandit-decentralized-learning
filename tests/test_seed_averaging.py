@@ -8,7 +8,7 @@ def _write_seed_result(result_dir, seed, accuracy_array, selected_neighbors):
     seed_dir = seed_result_dir(result_dir, seed)
     seed_dir.mkdir(parents=True)
     np.save(seed_dir / "evaluation_steps.npy", np.array([0, 2]))
-    np.save(seed_dir / "local_accuracy.npy", accuracy_array)
+    np.save(seed_dir / "validation_accuracy.npy", accuracy_array)
     np.save(seed_dir / "selected_neighbors.npy", selected_neighbors)
 
 
@@ -31,10 +31,10 @@ def test_aggregate_seed_results_writes_public_mean_and_by_seed_arrays(tmp_path):
 
     np.testing.assert_allclose(np.load(result_dir / "evaluation_steps.npy"), np.array([0, 2]))
     np.testing.assert_allclose(
-        np.load(result_dir / "local_accuracy.npy"),
+        np.load(result_dir / "validation_accuracy.npy"),
         np.array([[0.2, 0.4], [0.6, 0.8]]),
     )
-    assert np.load(result_dir / "local_accuracy_by_seed.npy").shape == (2, 2, 2)
+    assert np.load(result_dir / "validation_accuracy_by_seed.npy").shape == (2, 2, 2)
     assert np.load(result_dir / "selected_neighbors_by_seed.npy").shape == (2, 1, 2, 1)
     assert not (result_dir / "selected_neighbors.npy").exists()
 

@@ -232,12 +232,24 @@ def plot_all(run_dir: Path, plots_dir: Path, run_label: str | None = None) -> No
     plotter = StandardPlotter(run_dir, plots_dir, labels=labels)
 
     plotter.plot(
-        "val_accuracy.png",
+        "validation_accuracy.png",
         [
             Panel(
                 "Validation Accuracy",
                 "Accuracy",
-                _node_series(MetricKey.VALIDATION_ACCURACIES, interpolate_eval=True),
+                _node_series(MetricKey.VALIDATION_ACCURACY, interpolate_eval=True),
+                ylim=(0, 1),
+            )
+        ],
+    )
+
+    plotter.plot(
+        "global_accuracy.png",
+        [
+            Panel(
+                "Subsampled Global Test Accuracy",
+                "Accuracy",
+                _node_series(MetricKey.GLOBAL_ACCURACY, interpolate_eval=True),
                 ylim=(0, 1),
             )
         ],
@@ -249,7 +261,7 @@ def plot_all(run_dir: Path, plots_dir: Path, run_label: str | None = None) -> No
             Panel(
                 "Validation Loss",
                 "Loss",
-                _node_series(MetricKey.VALIDATION_LOSSES, interpolate_eval=True),
+                _node_series(MetricKey.VALIDATION_LOSS, interpolate_eval=True),
             )
         ],
     )
@@ -260,7 +272,7 @@ def plot_all(run_dir: Path, plots_dir: Path, run_label: str | None = None) -> No
             Panel(
                 "Training Loss",
                 "Loss",
-                _node_series(MetricKey.TRAIN_LOSSES, interpolate_eval=True),
+                _node_series(MetricKey.TRAIN_LOSS),
             )
         ],
     )

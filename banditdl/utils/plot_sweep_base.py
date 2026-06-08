@@ -13,9 +13,10 @@ from banditdl.utils.experiment_table import ExperimentTable, SweepRow
 from banditdl.utils.metrics import MetricLoader, scalar_reduce_seed_outer
 
 DEFAULT_PLOT_METRICS: tuple[str, ...] = (
-    "validation_accuracies",
-    "validation_losses",
-    "train_losses",
+    "validation_accuracy",
+    "validation_loss",
+    "global_accuracy",
+    "train_loss",
     "reward_algorithm",
     "reward_oracle",
     "regret",
