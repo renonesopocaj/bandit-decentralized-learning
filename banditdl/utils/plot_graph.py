@@ -37,7 +37,9 @@ from omegaconf import OmegaConf
 
 from banditdl.utils.metrics import trim_unwritten_rounds
 
-WeightSource = Literal["sampler_probability", "neighbor_disagreement"]
+WeightSource = Literal[
+    "sampler_probability", "sampler_weights", "selection_frequency", "neighbor_disagreement"
+]
 
 
 def _hydra_cfg(run_dir: pathlib.Path):
@@ -96,6 +98,60 @@ def _load_weights(
             raise FileNotFoundError(f"Missing {full_path}")
         n = prob.shape[0]
         honest_block = prob[:, :n]  # restrict to honest-honest edges
+        return np.asarray(honest_block, dtype=float), True
+    if weight_source == "sampler_weights":
+        # Raw per-worker bandit arm weights (pre-normalization), final round.
+        # Same asymmetric/directed layout as ``sampler_probability``: entry
+        # ``W[i, j]`` is worker ``i``'s bandit weight for sampling worker ``j``.
+        full_by_seed_path = run_dir / "sampler_weights_by_seed.npy"
+        full_path = run_dir / "sampler_weights.npy"
+        by_seed_path = run_dir / "sampler_weights_final_by_seed.npy"
+        path = run_dir / "sampler_weights_final.npy"
+        if full_by_seed_path.is_file():
+            history = trim_unwritten_rounds(np.load(full_by_seed_path))
+            if history.shape[1] == 0:
+                raise ValueError(f"{full_by_seed_path} has no completed rounds")
+            weights = np.nanmean(history[:, -1], axis=0)
+        elif full_path.is_file():
+            history = trim_unwritten_rounds(np.load(full_path))
+            if history.shape[0] == 0:
+                raise ValueError(f"{full_path} has no completed rounds")
+            weights = history[-1]
+        elif by_seed_path.is_file():
+            weights = np.nanmean(np.load(by_seed_path), axis=0)
+        elif path.is_file():
+            weights = np.load(path)
+        else:
+            raise FileNotFoundError(f"Missing {full_path}")
+        n = weights.shape[0]
+        honest_block = weights[:, :n]  # restrict to honest-honest edges
+        return np.asarray(honest_block, dtype=float), True
+    if weight_source == "selection_frequency":
+        # Time-averaged sampler selection probability over the trailing 20% of rounds.
+        # The single-round 'sampler_probability' is quantized to 1/k on each worker's
+        # top-k arms (uninformative), and UCB samplers' 'sampler_weights' (the UCB
+        # index) equalize across arms by construction. Averaging the *selection*
+        # over many rounds instead recovers which neighbors a worker consistently
+        # picks -- the observable proxy for its pull-count distribution -- and reveals
+        # the learned cluster structure for every sampler, UCB included.
+        full_by_seed_path = run_dir / "sampler_probabilities_by_seed.npy"
+        full_path = run_dir / "sampler_probabilities.npy"
+        if full_by_seed_path.is_file():
+            history = trim_unwritten_rounds(np.load(full_by_seed_path))
+            if history.shape[1] == 0:
+                raise ValueError(f"{full_by_seed_path} has no completed rounds")
+            window = max(1, round(0.2 * history.shape[1]))
+            freq = np.nanmean(history[:, -window:], axis=(0, 1))
+        elif full_path.is_file():
+            history = trim_unwritten_rounds(np.load(full_path))
+            if history.shape[0] == 0:
+                raise ValueError(f"{full_path} has no completed rounds")
+            window = max(1, round(0.2 * history.shape[0]))
+            freq = np.nanmean(history[-window:], axis=0)
+        else:
+            raise FileNotFoundError(f"Missing {full_path}")
+        n = freq.shape[0]
+        honest_block = freq[:, :n]  # restrict to honest-honest edges
         return np.asarray(honest_block, dtype=float), True
     if weight_source == "neighbor_disagreement":
         by_seed_path = run_dir / "pairwise_model_distance_final_by_seed.npy"
@@ -182,9 +238,11 @@ def plot_clustering_graph(
     *,
     weight_source: WeightSource = "sampler_probability",
     threshold: float | None = None,
-    top_edges_per_node: int | None = None,
+    top_edges_per_node: int | Literal["auto"] | None = None,
     layout: Literal["auto", "spring", "group"] = "auto",
     title: str | None = None,
+    edge_width_scale: float = 1.0,
+    edge_alpha: float = 0.85,
 ) -> pathlib.Path:
     """Render and save the weighted clustering graph for `run_dir`.
 
@@ -202,6 +260,16 @@ def plot_clustering_graph(
         nb_workers = int(OmegaConf.select(cfg, "topology.nodes"))
         nb_byz = int(OmegaConf.select(cfg, "adversary.byzcount") or 0)
         n_honest = nb_workers - nb_byz
+
+    # "auto" keeps each node's k strongest edges, where k is the number of
+    # neighbors it actually samples per round (round((nodes-1) * sampling)) -- this
+    # surfaces the learned cluster structure that an unfiltered dense graph hides.
+    if top_edges_per_node == "auto":
+        if cfg is not None and n_honest is not None:
+            sampling = float(OmegaConf.select(cfg, "topology.sampling") or 0.0)
+            top_edges_per_node = max(1, min(n_honest - 1, round((n_honest - 1) * sampling)))
+        else:
+            top_edges_per_node = None
 
     weights, directed = _load_weights(run_dir, weight_source, n_honest)
     n = weights.shape[0]
@@ -229,10 +297,10 @@ def plot_clustering_graph(
     if edges and edge_weights.max() > 0:
         norm = mcolors.Normalize(vmin=0.0, vmax=float(edge_weights.max()))
         edge_colors = edge_cmap(norm(edge_weights))
-        edge_widths = 0.4 + 3.5 * edge_weights / edge_weights.max()
+        edge_widths = edge_width_scale * (0.4 + 3.5 * edge_weights / edge_weights.max())
     else:
         edge_colors = "lightgray"
-        edge_widths = 0.5
+        edge_widths = 0.5 * edge_width_scale
         norm = None
 
     node_size = 260
@@ -256,7 +324,7 @@ def plot_clustering_graph(
         edgelist=[(u, v) for u, v, _ in edges],
         width=edge_widths,
         edge_color=edge_colors,
-        alpha=0.85,
+        alpha=edge_alpha,
         ax=ax,
         **directed_edge_kwargs,
     )
@@ -290,4 +358,8 @@ def plot_clustering_graph(
 def _edge_label(weight_source: WeightSource) -> str:
     if weight_source == "sampler_probability":
         return "Sampler probability P(i → j), final round"
+    if weight_source == "sampler_weights":
+        return "Sampler weight W(i → j), final round"
+    if weight_source == "selection_frequency":
+        return "Mean P(i selects j), last 20% of rounds"
     return "1 / (1 + final model L2 distance)"
