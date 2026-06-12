@@ -24,8 +24,9 @@ sampling structure*, *consensus*, and *reward regret*.
   communication, and how does this depend on heterogeneity?
 - **Q2** Does the converged sampling distribution recover the latent cluster
   structure of the partition?
-- **Q3** Which reward signal best drives the bandit, and does decreasing realized
-  regret correspond to better learning?
+- **Q3** Which reward signal best drives the bandit, and does decreasing realized regret correspond to better learning?
+- **Q4** How does discounting reposition a sampler on the
+personalization--generalization front?
 
 ## 2. Repository structure
 
