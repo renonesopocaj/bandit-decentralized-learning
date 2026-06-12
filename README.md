@@ -1,9 +1,5 @@
 # BanditDL — Adaptive Neighbor Sampling in Decentralized Learning
 
-Code accompanying the EPFL *Optimization for Machine Learning* mini-project
-**"Impact of Adaptive Neighbor Sampling on Optimization in Decentralized
-Federated Learning"** (Bombarda, Busato, Senoner).
-
 ## 1. Overview
 
 In decentralized (serverless) learning, every node trains locally and must spread
