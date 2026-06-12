@@ -32,7 +32,7 @@ sampling structure*, *consensus*, and *reward regret*.
 ```
 BanditDL/
 ├── README.md                 # this file
-├── reproduce.sh              # entry point: runs the paper's experiment grids
+├── reproduce.sh              # entry point: runs the predefined experiment grids
 ├── pyproject.toml            # dependencies (PEP 621) + ruff config
 ├── uv.lock                   # pinned dependency versions
 │
@@ -46,7 +46,7 @@ BanditDL/
 │   │   ├── providers.py      # MNIST/CIFAR-10 (torchvision) and FEMNIST loaders
 │   │   ├── partitioning.py   # synthetic (Dirichlet/pathological) + natural splits
 │   │   ├── dataset.py        # builds per-node train/val/test loaders
-│   │   └── models.py         # cnn_mnist, cnn_femnist, cnn_cifar (Table II archs)
+│   │   └── models.py         # cnn_mnist, cnn_femnist, cnn_cifar (per-dataset CNNs)
 │   ├── experiments/
 │   │   ├── hydra_run.py      # composes config, runs seeds, plots
 │   │   ├── engine.py         # the decentralized training/evaluation loop
@@ -59,7 +59,7 @@ BanditDL/
 │   ├── dataset/  optimization/  heterogeneity/  sampler/
 │   ├── topology/ adversary/ aggregator/ evaluation/ optuna/
 │
-├── scripts/                  # offline figure/table generators (see §7)
+├── scripts/                  # offline plotting & analysis scripts (see §7)
 ├── docs/                     # extended config and sweep reference
 └── tests/                    # pytest unit tests
 ```
@@ -126,43 +126,43 @@ Each run writes a self-contained folder:
 
 Public arrays under `results/` are seed-averaged; `*_by_seed.npy` arrays keep the
 seed dimension. Metric arrays of shape `(evaluations, nodes)` include
-`validation_accuracy` (each node on its own local test set — the paper's "local
-accuracy"), `global_accuracy` (every node on the shared 10 % holdout),
+`validation_accuracy` (each node on its own local test set — its local
+accuracy), `global_accuracy` (every node on the shared 10 % holdout),
 `validation_loss`, and `train_loss`; diagnostics include
 `sampler_probabilities` / `sampler_weights` `(rounds, nodes, nodes)`,
 `reward_algorithm`, `reward_oracle`, `regret`, `neighbor_disagreement`,
 `consensus_drift`, and `gradient_norms`. See [docs/config.md](docs/config.md) for
 the full list.
 
-## 6. Reproducing the experiments
+## 6. Experiment grids
 
-`reproduce.sh` encodes the exact grids behind the paper. Each named experiment
-loops `uv run -m banditdl` over the reported configurations:
+`reproduce.sh` bundles a few predefined experiment grids. Each named target
+loops `uv run -m banditdl` over a set of configurations:
 
 ```bash
-bash reproduce.sh femnist_main      # main study (Fig. 1, 5-7; Table I; App. C)
-bash reproduce.sh cifar_discount    # discount ablation (Tables III-IV; Fig. 8-10; App. D)
-bash reproduce.sh dirichlet         # Dirichlet alpha sweep (Fig. 3-4; Table I rows)
+bash reproduce.sh femnist_main      # FEMNIST: 3 cluster profiles x all samplers x 2 rewards
+bash reproduce.sh cifar_discount    # CIFAR-10 discount ablation: {cucb,cts} x gamma x 2 rewards
+bash reproduce.sh dirichlet         # Dirichlet heterogeneity sweep (alpha in {0.5, 1, 10})
 ```
 
-**Fixed factors (match the report):** `n = 30` honest nodes, mean aggregation,
-one local SGD step per round, evaluation every 20 rounds, a 10 % global test
-holdout, and a 20 % per-node local test holdout. Optimizer hyperparameters live
-in `conf/optimization/`:
+**Shared settings:** `n = 30` honest nodes, mean aggregation, one local SGD step
+per round, evaluation every 20 rounds, a 10 % global test holdout, and a 20 %
+per-node local test holdout. Optimizer hyperparameters live in
+`conf/optimization/`:
 
-| Dataset  | Loss              | LR    | Momentum | Weight decay | Batch | Rounds (paper) |
-|----------|-------------------|-------|----------|--------------|-------|----------------|
-| MNIST    | NLL               | 0.05* | 0.9      | 1e-4         | 25    | 200            |
-| FEMNIST  | NLL               | 0.05  | 0.9      | 1e-4         | 25    | 500            |
-| CIFAR-10 | CrossEntropy      | 0.5   | 0.99     | 1e-2         | 50    | 500–2000       |
+| Dataset  | Loss              | LR    | Momentum | Weight decay | Batch | Rounds   |
+|----------|-------------------|-------|----------|--------------|-------|----------|
+| MNIST    | NLL               | 0.05* | 0.9      | 1e-4         | 25    | 200      |
+| FEMNIST  | NLL               | 0.05  | 0.9      | 1e-4         | 25    | 500      |
+| CIFAR-10 | CrossEntropy      | 0.5   | 0.99     | 1e-2         | 50    | 500–2000 |
 
-`*` MNIST uses the engine default LR (0.5) unless overridden; set
-`optimization.learning_rate=0.05` to match the report exactly.
+`*` MNIST falls back to the engine default LR (0.5) unless you pass
+`optimization.learning_rate=0.05`.
 
-Reward signals: `parameter_distance` (inverse model distance, "IMD"),
-`cosine_similarity` (cosine on weights), and `update_cosine_similarity` (cosine
-on local updates, the paper's "COS"). Seeds default to `{0, 1, 2}` averaged
-in-process via `num_seeds=3`.
+Reward signals: `parameter_distance` (inverse model distance),
+`cosine_similarity` (cosine on model weights), and `update_cosine_similarity`
+(cosine on local updates). Seeds default to `{0, 1, 2}`, averaged in-process via
+`num_seeds=3`.
 
 **Runtime.** Cost is dominated by `nodes × rounds` forward/backward passes.
 MNIST/FEMNIST configs take minutes to ~1 h on a single CPU; CIFAR-10 (deeper
@@ -171,17 +171,19 @@ grids are large — shrink `SEEDS`/`ROUNDS` in `reproduce.sh`, or run a single
 `uv run -m banditdl ...` line, while iterating. Add `device=cuda` (or
 `device=mps`) to use an accelerator.
 
-## 7. Generating figures and tables
+## 7. Plotting and analysis
 
-The figure/table generators read finished run folders (no retraining):
+Every run auto-writes plots for all available metrics to its own `plots/`
+folder. The scripts in `scripts/` regenerate or extend these offline from
+finished run folders (no retraining):
 
-| Report artifact                                   | Script |
-|---------------------------------------------------|--------|
-| Per-run training curves — gradient norm, neighbor disagreement, regret, loss, accuracy (Fig. 6–8, 10b/d) | auto-written to each run's `plots/`, or `scripts/plot_results.py` |
-| Sampling-probability network graphs (Fig. 2, 3, 9, 10a/c) | `scripts/plot_clustering_graph.py` |
-| Cluster-purity summary (does sampling recover clusters, Q2) | `scripts/analyze_clustering.py` |
-| Sweep heatmaps over reward × sampler / cluster × sampler (Fig. 5) | `scripts/plot_sweep.py` |
-| Discount comparison tables, γ × reward (Tables III–IV) | `scripts/plot_discount_tables.py` |
+| Script | What it produces |
+|--------|------------------|
+| `scripts/plot_results.py` | Per-run / multi-run training curves: accuracy, loss, regret, neighbor disagreement, gradient norm, sampler aggressiveness, … |
+| `scripts/plot_clustering_graph.py` | Network graph of the final sampling probabilities (how concentrated each node's neighbor selection is) |
+| `scripts/analyze_clustering.py` | Per-node cluster-purity summary of the converged neighbor selections |
+| `scripts/plot_sweep.py` | Heatmaps from a completed Optuna sweep study |
+| `scripts/plot_discount_tables.py` | Discount comparison tables (γ × reward) over a directory of runs |
 
 Examples (point them at the run folders produced in §6):
 
@@ -198,14 +200,14 @@ uv run python scripts/plot_clustering_graph.py .hydra_runs/<date>/<time>_local \
 uv run python scripts/analyze_clustering.py .hydra_runs/<date>/*_local \
   --partition pathological_5g_2c --tail 200
 
-# Discount tables over a directory of discount-ablation runs
+# Discount tables over a directory of runs
 uv run python scripts/plot_discount_tables.py .hydra_runs/<date>
 ```
 
-The Pareto-frontier scatter (Fig. 1) and reward-delta heatmaps (Fig. 4) are
-assembled from the per-config scalar metrics produced above (local vs global
-accuracy/loss, and the COS-minus-IMD differences); see
-[docs/sweeps.md](docs/sweeps.md) for the sweep-plotting configuration.
+Cross-configuration comparisons (e.g. local vs global accuracy, or the gap
+between two reward signals) can be assembled from the scalar metrics these
+scripts expose; see [docs/sweeps.md](docs/sweeps.md) for the declarative
+sweep-plotting configuration.
 
 ## 8. Configuration
 
