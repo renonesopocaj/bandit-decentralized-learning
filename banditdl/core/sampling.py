@@ -52,11 +52,58 @@ class CosineSimilarityReward(RewardStrategy):
         return ((similarities + 1) / 2).clamp(0, 1).tolist()
 
 
+class UpdateCosineSimilarityReward(RewardStrategy):
+    """Reward = cosine similarity between a worker's own model *update* (the change
+    in weights since the previous round) and each neighbor's update, mapped to [0, 1].
+
+    Unlike `CosineSimilarityReward` (which compares raw weight vectors), this compares
+    update *directions* — useful for detecting neighbors moving the same way as you.
+    It is stateful: it caches the previous round's local and neighbor weight vectors.
+    The neighbor ordering passed to `score` is stable across rounds for a fixed topology
+    (candidates are always `0..n-1` minus self, plus the fixed byzantine ids), so the
+    cached neighbor stack aligns positionally round-to-round. On the first round (or if
+    the candidate set size changes) no update is available yet and it returns a neutral
+    0.5 for every neighbor.
+    """
+
+    def __init__(self):
+        self._prev_local = None
+        self._prev_neighbors = None
+
+    def score(self, local_weights, neighbor_weights) -> list[float]:
+        if not neighbor_weights:
+            self._prev_local = local_weights.detach()
+            self._prev_neighbors = None
+            return []
+        neighbors = torch.stack(neighbor_weights)
+        if (
+            self._prev_local is None
+            or self._prev_neighbors is None
+            or self._prev_neighbors.shape != neighbors.shape
+        ):
+            self._prev_local = local_weights.detach()
+            self._prev_neighbors = neighbors.detach()
+            return [0.5] * len(neighbor_weights)
+
+        local_delta = local_weights - self._prev_local
+        neighbor_deltas = neighbors - self._prev_neighbors
+        local_delta_b = local_delta.unsqueeze(0).expand_as(neighbor_deltas)
+        similarities = F.cosine_similarity(neighbor_deltas, local_delta_b, dim=1, eps=1e-12)
+        zero_norm = (neighbor_deltas.norm(dim=1) == 0) | (local_delta.norm() == 0)
+        similarities = torch.where(zero_norm, 0.0, similarities)
+
+        self._prev_local = local_weights.detach()
+        self._prev_neighbors = neighbors.detach()
+        return ((similarities + 1) / 2).clamp(0, 1).tolist()
+
+
 def make_reward_strategy(name):
     if name == "parameter_distance":
         return ParameterDistanceReward()
     if name == "cosine_similarity":
         return CosineSimilarityReward()
+    if name == "update_cosine_similarity":
+        return UpdateCosineSimilarityReward()
     raise ValueError(f"Unknown bandit reward strategy: {name}")
 
 

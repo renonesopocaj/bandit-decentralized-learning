@@ -393,12 +393,28 @@ def plot_all(run_dir: Path, plots_dir: Path, run_label: str | None = None) -> No
 
     from banditdl.utils.plot_graph import plot_clustering_graph
 
-    for weight_source in ("sampler_probability", "neighbor_disagreement"):
+    for weight_source in (
+        "sampler_probability",
+        "sampler_weights",
+        "selection_frequency",
+        "neighbor_disagreement",
+    ):
+        # sampler_weights is dense+near-uniform, so keep each node's k strongest
+        # edges ("auto"). selection_frequency already encodes structure in the edge
+        # weights, so show all edges but draw them thin/light so the faint
+        # cross-cluster web doesn't overwhelm the bright within-cluster edges.
+        extra = {
+            "sampler_weights": dict(top_edges_per_node="auto"),
+            "selection_frequency": dict(
+                top_edges_per_node=None, edge_width_scale=0.4, edge_alpha=0.5
+            ),
+        }.get(weight_source, {})
         try:
             plot_clustering_graph(
                 run_dir,
                 Path(plots_dir) / f"clustering_{weight_source}.png",
                 weight_source=weight_source,
+                **extra,
             )
         except FileNotFoundError:
             pass
