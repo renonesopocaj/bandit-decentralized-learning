@@ -146,32 +146,6 @@ bash reproduce.sh cifar_discount    # CIFAR-10 discount ablation: {cucb,cts} x g
 bash reproduce.sh dirichlet         # Dirichlet heterogeneity sweep (alpha in {0.5, 1, 10})
 ```
 
-**Shared settings:** `n = 30` honest nodes, mean aggregation, one local SGD step
-per round, evaluation every 20 rounds, a 10 % global test holdout, and a 20 %
-per-node local test holdout. Optimizer hyperparameters live in
-`conf/optimization/`:
-
-| Dataset  | Loss              | LR    | Momentum | Weight decay | Batch | Rounds   |
-|----------|-------------------|-------|----------|--------------|-------|----------|
-| MNIST    | NLL               | 0.05* | 0.9      | 1e-4         | 25    | 200      |
-| FEMNIST  | NLL               | 0.05  | 0.9      | 1e-4         | 25    | 500      |
-| CIFAR-10 | CrossEntropy      | 0.5   | 0.99     | 1e-2         | 50    | 500–2000 |
-
-`*` MNIST falls back to the engine default LR (0.5) unless you pass
-`optimization.learning_rate=0.05`.
-
-Reward signals: `parameter_distance` (inverse model distance),
-`cosine_similarity` (cosine on model weights), and `update_cosine_similarity`
-(cosine on local updates). Seeds default to `{0, 1, 2}`, averaged in-process via
-`num_seeds=3`.
-
-**Runtime.** Cost is dominated by `nodes × rounds` forward/backward passes.
-MNIST/FEMNIST configs take minutes to ~1 h on a single CPU; CIFAR-10 (deeper
-model, 500–2000 rounds) takes a few hours per config (~15–20 s/round). The full
-grids are large — shrink `SEEDS`/`ROUNDS` in `reproduce.sh`, or run a single
-`uv run -m banditdl ...` line, while iterating. Add `device=cuda` (or
-`device=mps`) to use an accelerator.
-
 ## 7. Plotting and analysis
 
 Every run auto-writes plots for all available metrics to its own `plots/`
