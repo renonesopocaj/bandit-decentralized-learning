@@ -1,4 +1,4 @@
-# BanditDL — Adaptive Neighbor Sampling in Decentralized Learning
+# Bandit-Based Neighbor Selection for Decentralized Learning under Data Heterogeneity
 
 ## 1. Overview
 
