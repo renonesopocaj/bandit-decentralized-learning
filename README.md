@@ -20,6 +20,8 @@ sampling structure*, *consensus*, and *reward regret*.
 
 [Read the report](Bandit%20Based%20Neighbor%20Selection%20for%20Decentralized%20Learning%20under%20Data%20Heterogeneity.pdf)
 
+![clusters_vs_discount.png](report/clusters_vs_discount.png)
+
 ### Research questions
 
 - **Q1** Does bandit-based selection improve over uniform sampling at equal
